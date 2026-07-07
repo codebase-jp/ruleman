@@ -47,4 +47,7 @@ cargo clippy --all-targets -- -D warnings   # CI fails on any warning
 ## Commit messages
 
 Write commit messages in English, even though conversation with the user
-may be in Japanese.
+may be in Japanese. Follow [Conventional Commits](https://www.conventionalcommits.org/):
+`<type>: <summary>`, e.g. `feat: add negate option to json-match`,
+`fix: handle missing config file`, `docs: update rule reference`. Common
+types: `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, `chore`.
