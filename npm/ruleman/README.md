@@ -8,5 +8,5 @@ npx ruleman init
 npx ruleman
 ```
 
-Full docs: https://codebase-jp.github.io/ruleman/
+Full docs: https://ruleman.dev/
 Source: https://github.com/codebase-jp/ruleman

@@ -19,7 +19,7 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
 - `npm/scripts/sync-version.mjs` — syncs one version number across
   `Cargo.toml` and every `npm/**/package.json`.
 - `docs/` — GitHub Pages site (`docs/index.md`) and the config JSON Schema
-  (`docs/schema.json`), served at `https://codebase-jp.github.io/ruleman/`.
+  (`docs/schema.json`), served at `https://ruleman.dev/`.
 - `.github/workflows/ci.yml` — fmt/clippy/test on push and PR.
 - `.github/workflows/release.yml` — on `vX.Y.Z` tag push: builds all
   platforms natively (no cross-compilation toolchains needed — each matrix

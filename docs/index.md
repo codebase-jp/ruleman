@@ -29,7 +29,7 @@ npx ruleman        # runs the checks
 ```jsonc
 // ruleman.json
 {
-  "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
+  "$schema": "https://ruleman.dev/schema.json",
   "rules": [
     {
       "type": "file",
@@ -56,7 +56,7 @@ walking up — the same pattern used by eslint, prettier, and biome. Pass
 
 ## Config reference
 
-Add `"$schema": "https://codebase-jp.github.io/ruleman/schema.json"` to any
+Add `"$schema": "https://ruleman.dev/schema.json"` to any
 config file to get autocomplete and validation in editors that support the
 `$schema` convention (VS Code, JetBrains IDEs, etc.).
 

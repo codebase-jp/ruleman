@@ -9,7 +9,7 @@ JSON(C) rule file and it checks things like "does this file exist" or "does
 this JSON file have the expected value at this key" — useful for enforcing
 repo-wide conventions in CI.
 
-Full documentation: **[codebase-jp.github.io/ruleman](https://codebase-jp.github.io/ruleman/)**
+Full documentation: **[ruleman.dev](https://ruleman.dev/)**
 
 ## Install
 
@@ -33,7 +33,7 @@ npx ruleman        # runs the checks
 
 ```jsonc
 {
-  "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
+  "$schema": "https://ruleman.dev/schema.json",
   "rules": [
     {
       "type": "file",

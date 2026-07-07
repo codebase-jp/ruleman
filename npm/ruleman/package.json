@@ -14,7 +14,7 @@
     "type": "git",
     "url": "git+https://github.com/codebase-jp/ruleman.git"
   },
-  "homepage": "https://codebase-jp.github.io/ruleman/",
+  "homepage": "https://ruleman.dev/",
   "bugs": "https://github.com/codebase-jp/ruleman/issues",
   "bin": {
     "ruleman": "bin/ruleman.js"

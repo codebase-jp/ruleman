@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://codebase-jp.github.io/ruleman/schema.json",
+  "$id": "https://ruleman.dev/schema.json",
   "title": "ruleman configuration",
   "type": "object",
   "additionalProperties": false,

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const CONFIG_CANDIDATES: &[&str] = &["ruleman.json", "ruleman.jsonc", ".ruleman.json"];
 
 const INIT_TEMPLATE: &str = r#"{
-  "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
+  "$schema": "https://ruleman.dev/schema.json",
   "rules": [
     {
       "type": "file",
