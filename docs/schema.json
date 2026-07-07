@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codebase-jp.github.io/ruleman/schema.json",
+  "title": "ruleman configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Points editors at this schema for autocomplete/validation."
+    },
+    "extends": {
+      "type": "array",
+      "description": "Other ruleman config files to inherit rules from, resolved relative to this file.",
+      "items": { "type": "string" }
+    },
+    "rules": {
+      "type": "array",
+      "description": "The checks to run, in order.",
+      "items": { "$ref": "#/definitions/rule" }
+    }
+  },
+  "definitions": {
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warn", "off"],
+      "default": "error"
+    },
+    "rule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "files"],
+          "properties": {
+            "type": { "const": "file-existence" },
+            "severity": { "$ref": "#/definitions/severity" },
+            "files": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Files that must exist, relative to the working directory."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "file", "key", "expected"],
+          "properties": {
+            "type": { "const": "json-match" },
+            "severity": { "$ref": "#/definitions/severity" },
+            "file": { "type": "string", "description": "Path to a JSON file." },
+            "key": { "type": "string", "description": "Dot-separated path into the JSON document." },
+            "expected": { "description": "The value `key` must equal." }
+          }
+        }
+      ]
+    }
+  }
+}

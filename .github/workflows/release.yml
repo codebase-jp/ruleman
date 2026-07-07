@@ -1,0 +1,144 @@
+name: Release
+
+# Triggered by pushing a tag like `v0.2.0`. The tag is the single source of
+# truth for the version: it gets synced into Cargo.toml and every npm
+# package.json before anything is built or published.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - npm_dir: linux-x64-gnu
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            bin_name: ruleman
+          - npm_dir: linux-arm64-gnu
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            bin_name: ruleman
+          - npm_dir: darwin-x64
+            target: x86_64-apple-darwin
+            os: macos-13
+            bin_name: ruleman
+          - npm_dir: darwin-arm64
+            target: aarch64-apple-darwin
+            os: macos-14
+            bin_name: ruleman
+          - npm_dir: win32-x64-msvc
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_name: ruleman.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Sync version into Cargo.toml / package.json files
+        shell: bash
+        run: node npm/scripts/sync-version.mjs "$VERSION"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binary into its npm platform package
+        shell: bash
+        run: |
+          mkdir -p "npm/platforms/${{ matrix.npm_dir }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" \
+             "npm/platforms/${{ matrix.npm_dir }}/${{ matrix.bin_name }}"
+          chmod +x "npm/platforms/${{ matrix.npm_dir }}/${{ matrix.bin_name }}" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruleman-${{ matrix.npm_dir }}
+          path: npm/platforms/${{ matrix.npm_dir }}/${{ matrix.bin_name }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Sync version into Cargo.toml / package.json files
+        run: node npm/scripts/sync-version.mjs "$VERSION"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: npm/platforms
+          pattern: "ruleman-*"
+          merge-multiple: false
+
+      - name: Move downloaded binaries into place and restore executable bit
+        run: |
+          for dir in npm/platforms/ruleman-*; do
+            name="$(basename "$dir" | sed 's/^ruleman-//')"
+            mkdir -p "npm/platforms/$name"
+            mv "$dir"/* "npm/platforms/$name/"
+            rmdir "$dir"
+          done
+          chmod +x npm/platforms/linux-x64-gnu/ruleman
+          chmod +x npm/platforms/linux-arm64-gnu/ruleman
+          chmod +x npm/platforms/darwin-x64/ruleman
+          chmod +x npm/platforms/darwin-arm64/ruleman
+
+      - name: Publish platform packages
+        run: |
+          for dir in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            npm publish "npm/platforms/$dir" --access public --provenance
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main package
+        run: npm publish npm/ruleman --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Prepare uniquely-named release assets
+        run: |
+          mkdir -p dist
+          cp npm/platforms/linux-x64-gnu/ruleman dist/ruleman-linux-x64-gnu
+          cp npm/platforms/linux-arm64-gnu/ruleman dist/ruleman-linux-arm64-gnu
+          cp npm/platforms/darwin-x64/ruleman dist/ruleman-darwin-x64
+          cp npm/platforms/darwin-arm64/ruleman dist/ruleman-darwin-arm64
+          cp npm/platforms/win32-x64-msvc/ruleman.exe dist/ruleman-win32-x64-msvc.exe
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

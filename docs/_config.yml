@@ -1,0 +1,4 @@
+theme: jekyll-theme-cayman
+title: ruleman
+description: A static analysis CLI that checks repository files against a declarative rule config.
+show_downloads: false

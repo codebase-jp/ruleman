@@ -1,1 +1,6 @@
 /target
+node_modules/
+
+# Prebuilt binaries are staged into these directories by CI at release time.
+npm/platforms/*/ruleman
+npm/platforms/*/ruleman.exe

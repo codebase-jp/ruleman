@@ -1,0 +1,19 @@
+{
+  "name": "ruleman-darwin-x64",
+  "version": "0.1.0",
+  "description": "ruleman prebuilt binary for macOS x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebase-jp/ruleman.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "ruleman"
+  ]
+}

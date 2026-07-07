@@ -1,0 +1,35 @@
+{
+  "name": "ruleman",
+  "version": "0.1.0",
+  "description": "A static analysis tool that checks repository files against a declarative rule config.",
+  "keywords": [
+    "static-analysis",
+    "lint",
+    "cli",
+    "rules",
+    "ci"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebase-jp/ruleman.git"
+  },
+  "homepage": "https://codebase-jp.github.io/ruleman/",
+  "bugs": "https://github.com/codebase-jp/ruleman/issues",
+  "bin": {
+    "ruleman": "bin/ruleman.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "ruleman-linux-x64-gnu": "0.1.0",
+    "ruleman-linux-arm64-gnu": "0.1.0",
+    "ruleman-darwin-x64": "0.1.0",
+    "ruleman-darwin-arm64": "0.1.0",
+    "ruleman-win32-x64-msvc": "0.1.0"
+  }
+}

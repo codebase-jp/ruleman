@@ -1,57 +1,164 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const CONFIG_CANDIDATES: &[&str] = &["ruleman.json", "ruleman.jsonc", ".ruleman.json"];
+
+const INIT_TEMPLATE: &str = r#"{
+  "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
+  "rules": [
+    {
+      "type": "file-existence",
+      "severity": "error",
+      "files": ["README.md", "LICENSE"]
+    }
+  ]
+}
+"#;
 
 #[derive(Parser, Debug)]
-#[command(name = "molda")]
-struct Args {
-    #[arg(long, default_value = "molda.json")]
-    config: String,
+#[command(
+    name = "ruleman",
+    version,
+    about = "Repository static analysis by declarative rules"
+)]
+struct Cli {
+    /// Path to the config file. When omitted, ruleman.json / ruleman.jsonc / .ruleman.json
+    /// is discovered starting from the current directory and walking up.
+    #[arg(long, global = true)]
+    config: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Config {
-    rules: Vec<Rule>,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Scaffold a starter ruleman.json in the current directory.
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum Severity {
+    #[default]
+    Error,
+    Warn,
+    Off,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Rule {
     #[serde(rename = "file-existence")]
-    FileExistence { files: Vec<String> },
+    FileExistence {
+        #[serde(default)]
+        severity: Severity,
+        files: Vec<String>,
+    },
     #[serde(rename = "json-match")]
     JsonMatch {
+        #[serde(default)]
+        severity: Severity,
         file: String,
         key: String,
         expected: Value,
     },
 }
 
-fn load_config(path: &Path) -> Result<Config, String> {
+#[derive(Debug, Deserialize, Default)]
+struct RawConfig {
+    #[serde(default, rename = "$schema")]
+    #[allow(dead_code)]
+    schema: Option<String>,
+    #[serde(default)]
+    extends: Vec<String>,
+    #[serde(default)]
+    rules: Vec<Rule>,
+}
+
+struct Config {
+    rules: Vec<Rule>,
+}
+
+fn parse_config_text(raw: &str) -> Result<RawConfig, String> {
+    jsonc_parser::parse_to_serde_value(raw, &jsonc_parser::ParseOptions::default())
+        .map_err(|e| e.to_string())
+        .and_then(|value| {
+            let value = value.unwrap_or(Value::Object(Default::default()));
+            serde_json::from_value(value).map_err(|e| e.to_string())
+        })
+}
+
+fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
     if !path.exists() {
         return Err(format!(
-            "::error::[molda] 設定ファイル '{}' が見つかりません。",
+            "::error::[ruleman] 設定ファイル '{}' が見つかりません。",
             path.display()
         ));
     }
 
     let raw = fs::read_to_string(path).map_err(|e| {
         format!(
-            "::error::[molda] 設定ファイル '{}' の読み込みに失敗しました: {}",
+            "::error::[ruleman] 設定ファイル '{}' の読み込みに失敗しました: {}",
             path.display(),
             e
         )
     })?;
 
-    serde_json::from_str::<Config>(&raw).map_err(|e| {
+    parse_config_text(&raw).map_err(|e| {
         format!(
-            "::error::[molda] 設定ファイル '{}' のJSON解析に失敗しました: {}",
+            "::error::[ruleman] 設定ファイル '{}' の解析に失敗しました: {}",
             path.display(),
             e
         )
     })
+}
+
+/// Resolves `extends` recursively (relative to each config file's own directory),
+/// concatenating rules from extended configs first, followed by the file's own rules.
+fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Config, String> {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical.clone()) {
+        return Err(format!(
+            "::error::[ruleman] 設定ファイルの 'extends' が循環しています: '{}'",
+            path.display()
+        ));
+    }
+
+    let raw = load_raw_config(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut rules = Vec::new();
+    for extend in &raw.extends {
+        let extended_path = base_dir.join(extend);
+        let extended = load_config(&extended_path, visited)?;
+        rules.extend(extended.rules);
+    }
+    rules.extend(raw.rules);
+
+    Ok(Config { rules })
+}
+
+/// Searches for a config file starting in `dir`, then walking up parent directories.
+fn discover_config(start_dir: &Path) -> Option<PathBuf> {
+    let mut current = Some(start_dir);
+    while let Some(dir) = current {
+        for candidate in CONFIG_CANDIDATES {
+            let path = dir.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 fn get_value_by_dotted_key<'a>(root: &'a Value, dotted_key: &str) -> Option<&'a Value> {
@@ -64,53 +171,74 @@ fn json_key_matches(root: &Value, key: &str, expected: &Value) -> bool {
     get_value_by_dotted_key(root, key).is_some_and(|actual| actual == expected)
 }
 
-fn run(config_path: &str) -> i32 {
-    let config = match load_config(Path::new(config_path)) {
-        Ok(cfg) => cfg,
-        Err(message) => {
-            eprintln!("{}", message);
-            return 1;
+fn report(severity: Severity, message: &str) -> bool {
+    match severity {
+        Severity::Off => false,
+        Severity::Warn => {
+            eprintln!("::warning::{}", message);
+            false
         }
-    };
+        Severity::Error => {
+            eprintln!("::error::{}", message);
+            true
+        }
+    }
+}
 
+fn report_at(severity: Severity, file: &str, message: &str) -> bool {
+    match severity {
+        Severity::Off => false,
+        Severity::Warn => {
+            eprintln!("::warning file={}::{}", file, message);
+            false
+        }
+        Severity::Error => {
+            eprintln!("::error file={}::{}", file, message);
+            true
+        }
+    }
+}
+
+fn run_config(config: Config) -> i32 {
     let mut has_errors = false;
 
     for rule in config.rules {
         match rule {
-            Rule::FileExistence { files } => {
+            Rule::FileExistence { severity, files } => {
+                if severity == Severity::Off {
+                    continue;
+                }
                 for file in files {
                     if !Path::new(&file).exists() {
-                        eprintln!(
-                            "::error::[molda] 必須ファイル '{}' が見つかりません。",
-                            file
+                        has_errors |= report(
+                            severity,
+                            &format!("[ruleman] 必須ファイル '{}' が見つかりません。", file),
                         );
-                        has_errors = true;
                     }
                 }
             }
             Rule::JsonMatch {
+                severity,
                 file,
                 key,
                 expected,
             } => {
+                if severity == Severity::Off {
+                    continue;
+                }
+
                 let path = Path::new(&file);
+                let fail = || format!("[ruleman] ルール不適合: {} の検証に失敗しました。", key);
+
                 if !path.exists() {
-                    eprintln!(
-                        "::error file={}::[molda] ルール不適合: {} の検証に失敗しました。",
-                        file, key
-                    );
-                    has_errors = true;
+                    has_errors |= report_at(severity, &file, &fail());
                     continue;
                 }
 
                 let raw = match fs::read_to_string(path) {
                     Ok(content) => content,
                     Err(_) => {
-                        eprintln!(
-                            "::error file={}::[molda] ルール不適合: {} の検証に失敗しました。",
-                            file, key
-                        );
-                        has_errors = true;
+                        has_errors |= report_at(severity, &file, &fail());
                         continue;
                     }
                 };
@@ -118,21 +246,13 @@ fn run(config_path: &str) -> i32 {
                 let json = match serde_json::from_str::<Value>(&raw) {
                     Ok(value) => value,
                     Err(_) => {
-                        eprintln!(
-                            "::error file={}::[molda] ルール不適合: {} の検証に失敗しました。",
-                            file, key
-                        );
-                        has_errors = true;
+                        has_errors |= report_at(severity, &file, &fail());
                         continue;
                     }
                 };
 
                 if !json_key_matches(&json, &key, &expected) {
-                    eprintln!(
-                        "::error file={}::[molda] ルール不適合: {} の検証に失敗しました。",
-                        file, key
-                    );
-                    has_errors = true;
+                    has_errors |= report_at(severity, &file, &fail());
                 }
             }
         }
@@ -141,14 +261,70 @@ fn run(config_path: &str) -> i32 {
     if has_errors {
         1
     } else {
-        println!("[molda] すべての標準チェックに合格しました！");
+        println!("[ruleman] すべての標準チェックに合格しました!");
         0
     }
 }
 
+fn run(config_arg: Option<&str>) -> i32 {
+    let config_path = match config_arg {
+        Some(path) => PathBuf::from(path),
+        None => {
+            match discover_config(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+                Some(path) => path,
+                None => {
+                    eprintln!(
+                        "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
+                    );
+                    return 1;
+                }
+            }
+        }
+    };
+
+    let mut visited = HashSet::new();
+    match load_config(&config_path, &mut visited) {
+        Ok(config) => run_config(config),
+        Err(message) => {
+            eprintln!("{}", message);
+            1
+        }
+    }
+}
+
+fn run_init(force: bool) -> i32 {
+    let path = Path::new("ruleman.json");
+    if path.exists() && !force {
+        eprintln!(
+            "::error::[ruleman] '{}' は既に存在します。上書きするには --force を指定してください。",
+            path.display()
+        );
+        return 1;
+    }
+
+    match fs::write(path, INIT_TEMPLATE) {
+        Ok(()) => {
+            println!("[ruleman] '{}' を作成しました。", path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!(
+                "::error::[ruleman] '{}' の作成に失敗しました: {}",
+                path.display(),
+                e
+            );
+            1
+        }
+    }
+}
+
 fn main() {
-    let args = Args::parse();
-    std::process::exit(run(&args.config));
+    let cli = Cli::parse();
+    let code = match cli.command {
+        Some(Command::Init { force }) => run_init(force),
+        None => run(cli.config.as_deref()),
+    };
+    std::process::exit(code);
 }
 
 #[cfg(test)]
@@ -198,5 +374,27 @@ mod tests {
             "compilerOptions.strict",
             &json!(false)
         ));
+    }
+
+    #[test]
+    fn parses_jsonc_with_comments_and_trailing_commas() {
+        let text = r#"{
+            // a comment
+            "rules": [
+                { "type": "file-existence", "files": ["README.md"], },
+            ],
+        }"#;
+        let config = parse_config_text(text).unwrap();
+        assert_eq!(config.rules.len(), 1);
+    }
+
+    #[test]
+    fn severity_defaults_to_error() {
+        let text = r#"{ "rules": [ { "type": "file-existence", "files": [] } ] }"#;
+        let config = parse_config_text(text).unwrap();
+        match &config.rules[0] {
+            Rule::FileExistence { severity, .. } => assert_eq!(*severity, Severity::Error),
+            _ => panic!("unexpected rule"),
+        }
     }
 }

@@ -1,0 +1,22 @@
+{
+  "name": "ruleman-linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "ruleman prebuilt binary for linux arm64 (glibc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebase-jp/ruleman.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "ruleman"
+  ]
+}

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  npm-wrapper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Smoke test the npm launcher against a local build
+        run: |
+          mkdir -p npm/ruleman/node_modules/ruleman-linux-x64-gnu
+          cp target/release/ruleman npm/ruleman/node_modules/ruleman-linux-x64-gnu/ruleman
+          cp npm/platforms/linux-x64-gnu/package.json npm/ruleman/node_modules/ruleman-linux-x64-gnu/package.json
+          node npm/ruleman/bin/ruleman.js --version

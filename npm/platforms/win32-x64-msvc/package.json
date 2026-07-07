@@ -1,0 +1,19 @@
+{
+  "name": "ruleman-win32-x64-msvc",
+  "version": "0.1.0",
+  "description": "ruleman prebuilt binary for Windows x64 (MSVC)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebase-jp/ruleman.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "ruleman.exe"
+  ]
+}
