@@ -28,12 +28,19 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
 
 ## Rule design convention
 
-When a rule needs a negated/inverse check, don't add a mirror rule type
-(e.g. no `file-not-existence`). Follow the Ansible `file` module pattern:
-add an attribute that expresses direction/state on the existing rule type
-(`state: "present" | "absent"` on `file`, `negate: boolean` on `json-match`).
-Keep the attribute name meaningful per rule type rather than forcing one
-generic flag across all rule types.
+Follow Ansible's module conventions rather than inventing a new rule type
+for every variation:
+
+- Don't add a mirror rule type for a negated/inverse check (no
+  `file-not-existence`). Add a `state` attribute instead
+  (`state: "present" | "absent"` on `file`, `state: "match" | "mismatch"`
+  on `content`) — Ansible reuses `state` across modules with per-module enum
+  values (`file`: present/absent, `service`: started/stopped), and this
+  project follows the same convention.
+- Don't add a mirror rule type per file format either (no `json-match`,
+  `yaml-match`, `toml-match`). One `content` rule type takes a `format`
+  attribute (`"json"` today; `yaml`/`toml` planned) that selects the parser;
+  the dotted-key comparison logic stays shared regardless of format.
 
 ## Local dev
 
@@ -48,6 +55,6 @@ cargo clippy --all-targets -- -D warnings   # CI fails on any warning
 
 Write commit messages in English, even though conversation with the user
 may be in Japanese. Follow [Conventional Commits](https://www.conventionalcommits.org/):
-`<type>: <summary>`, e.g. `feat: add negate option to json-match`,
+`<type>: <summary>`, e.g. `feat: add mismatch state to content rule`,
 `fix: handle missing config file`, `docs: update rule reference`. Common
 types: `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, `chore`.

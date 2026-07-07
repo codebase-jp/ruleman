@@ -53,15 +53,22 @@
           "additionalProperties": false,
           "required": ["type", "file", "key", "expected"],
           "properties": {
-            "type": { "const": "json-match" },
+            "type": { "const": "content" },
             "severity": { "$ref": "#/definitions/severity" },
-            "negate": {
-              "type": "boolean",
-              "default": false,
-              "description": "false (default) requires equality; true requires inequality."
+            "format": {
+              "type": "string",
+              "enum": ["json"],
+              "default": "json",
+              "description": "Parser to use for the file. yaml/toml are planned."
             },
-            "file": { "type": "string", "description": "Path to a JSON file." },
-            "key": { "type": "string", "description": "Dot-separated path into the JSON document." },
+            "state": {
+              "type": "string",
+              "enum": ["match", "mismatch"],
+              "default": "match",
+              "description": "'match' requires the key to equal `expected`; 'mismatch' requires it not to."
+            },
+            "file": { "type": "string", "description": "Path to the file." },
+            "key": { "type": "string", "description": "Dot-separated path into the parsed document." },
             "expected": { "description": "The value `key` is compared against." }
           }
         }

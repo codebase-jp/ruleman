@@ -38,8 +38,9 @@ npx ruleman        # runs the checks
       "files": ["README.md", "LICENSE"]
     },
     {
-      "type": "json-match",
+      "type": "content",
       "severity": "warn",
+      "format": "json",
       "file": "tsconfig.json",
       "key": "compilerOptions.strict",
       "expected": true
@@ -87,27 +88,34 @@ case.
 | `files` | `string[]`                | yes      | Paths to check (repo-relative).                                    |
 | `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing; `"absent"` fails if found. |
 
-### `json-match`
+### `content`
 
-Fails unless `key` (a dot-separated path) in `file` equals `expected`. Set
-`negate: true` to invert the check — fail when it *does* equal `expected`
-— instead of adding a separate `json-not-match` rule type.
+Checks a value inside a structured file. Rather than a `json-match` rule
+type today and a `yaml-match`/`toml-match` type each time a new format is
+supported, `format` selects the parser and the rule type itself stays
+`content`. Named to pair with `file`: `file` checks whether a file exists,
+`content` checks what's inside it.
+
+`state: "match"` (default) fails unless `key` (a dot-separated path) in
+`file` equals `expected`; `state: "mismatch"` fails when it does.
 
 ```jsonc
 {
-  "type": "json-match",
+  "type": "content",
+  "format": "json",
   "file": "package.json",
   "key": "engines.node",
   "expected": ">=18"
 }
 ```
 
-| Field      | Type      | Required | Description                                                      |
-| ---------- | --------- | -------- | ---------------------------------------------------------------- |
-| `file`     | `string`  | yes      | Path to a JSON file.                                             |
-| `key`      | `string`  | yes      | Dot-separated path into the JSON document.                       |
-| `expected` | any       | yes      | The value `key` is compared against.                             |
-| `negate`   | `boolean` | no       | `false` (default) requires equality; `true` requires inequality. |
+| Field      | Type                      | Required | Description                                                              |
+| ---------- | ------------------------- | -------- | ------------------------------------------------------------------------ |
+| `format`   | `"json"`                  | no       | Parser to use. `"json"` (default); `yaml`/`toml` planned.                |
+| `file`     | `string`                  | yes      | Path to the file.                                                        |
+| `key`      | `string`                  | yes      | Dot-separated path into the parsed document.                             |
+| `expected` | any                       | yes      | The value `key` is compared against.                                     |
+| `state`    | `"match"` \| `"mismatch"` | no       | `"match"` (default) requires equality; `"mismatch"` requires inequality. |
 
 ### `extends`
 

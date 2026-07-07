@@ -62,6 +62,21 @@ enum FileState {
     Absent,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum ContentFormat {
+    #[default]
+    Json,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum MatchState {
+    #[default]
+    Match,
+    Mismatch,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Rule {
@@ -73,12 +88,14 @@ enum Rule {
         state: FileState,
         files: Vec<String>,
     },
-    #[serde(rename = "json-match")]
-    JsonMatch {
+    #[serde(rename = "content")]
+    Content {
         #[serde(default)]
         severity: Severity,
         #[serde(default)]
-        negate: bool,
+        format: ContentFormat,
+        #[serde(default)]
+        state: MatchState,
         file: String,
         key: String,
         expected: Value,
@@ -243,9 +260,10 @@ fn run_config(config: Config) -> i32 {
                     }
                 }
             }
-            Rule::JsonMatch {
+            Rule::Content {
                 severity,
-                negate,
+                format,
+                state,
                 file,
                 key,
                 expected,
@@ -270,7 +288,10 @@ fn run_config(config: Config) -> i32 {
                     }
                 };
 
-                let json = match serde_json::from_str::<Value>(&raw) {
+                let parsed = match format {
+                    ContentFormat::Json => serde_json::from_str::<Value>(&raw),
+                };
+                let document = match parsed {
                     Ok(value) => value,
                     Err(_) => {
                         has_errors |= report_at(severity, &file, &fail());
@@ -278,8 +299,12 @@ fn run_config(config: Config) -> i32 {
                     }
                 };
 
-                let matches = json_key_matches(&json, &key, &expected);
-                if matches == negate {
+                let matches = json_key_matches(&document, &key, &expected);
+                let fails = match state {
+                    MatchState::Match => !matches,
+                    MatchState::Mismatch => matches,
+                };
+                if fails {
                     has_errors |= report_at(severity, &file, &fail());
                 }
             }
@@ -432,15 +457,18 @@ mod tests {
     }
 
     #[test]
-    fn negate_defaults_to_false() {
+    fn content_format_and_state_default() {
         let text = r#"{
             "rules": [
-                { "type": "json-match", "file": "x.json", "key": "a", "expected": true }
+                { "type": "content", "file": "x.json", "key": "a", "expected": true }
             ]
         }"#;
         let config = parse_config_text(text).unwrap();
         match &config.rules[0] {
-            Rule::JsonMatch { negate, .. } => assert!(!negate),
+            Rule::Content { format, state, .. } => {
+                assert_eq!(*format, ContentFormat::Json);
+                assert_eq!(*state, MatchState::Match);
+            }
             _ => panic!("unexpected rule"),
         }
     }

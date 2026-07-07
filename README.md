@@ -42,8 +42,9 @@ npx ruleman        # runs the checks
       "files": ["README.md", "LICENSE"]
     },
     {
-      "type": "json-match",
+      "type": "content",
       "severity": "warn",
+      "format": "json",
       "file": "tsconfig.json",
       "key": "compilerOptions.strict",
       "expected": true
@@ -77,13 +78,15 @@ fails if any file exists.
 { "type": "file", "state": "absent", "files": ["yarn.lock"] }
 ```
 
-**`json-match`** — fails unless `key` (dot-separated path) in `file` equals
-`expected`. Set `negate: true` to instead fail when it *does* equal
-`expected`.
+**`content`** — checks a value inside a structured file. `format` selects
+the parser (currently `"json"`; `yaml`/`toml` planned). `state: "match"`
+(default) fails unless `key` (dot-separated path) equals `expected`;
+`state: "mismatch"` fails when it does.
 
 ```jsonc
 {
-  "type": "json-match",
+  "type": "content",
+  "format": "json",
   "file": "package.json",
   "key": "engines.node",
   "expected": ">=18"
