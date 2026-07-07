@@ -33,12 +33,18 @@
           "additionalProperties": false,
           "required": ["type", "files"],
           "properties": {
-            "type": { "const": "file-existence" },
+            "type": { "const": "file" },
             "severity": { "$ref": "#/definitions/severity" },
+            "state": {
+              "type": "string",
+              "enum": ["present", "absent"],
+              "default": "present",
+              "description": "'present' fails if a listed file is missing; 'absent' fails if it exists."
+            },
             "files": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Files that must exist, relative to the working directory."
+              "description": "Files to check, relative to the working directory."
             }
           }
         },
@@ -49,9 +55,14 @@
           "properties": {
             "type": { "const": "json-match" },
             "severity": { "$ref": "#/definitions/severity" },
+            "negate": {
+              "type": "boolean",
+              "default": false,
+              "description": "false (default) requires equality; true requires inequality."
+            },
             "file": { "type": "string", "description": "Path to a JSON file." },
             "key": { "type": "string", "description": "Dot-separated path into the JSON document." },
-            "expected": { "description": "The value `key` must equal." }
+            "expected": { "description": "The value `key` is compared against." }
           }
         }
       ]

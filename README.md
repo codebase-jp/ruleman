@@ -36,8 +36,9 @@ npx ruleman        # runs the checks
   "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
   "rules": [
     {
-      "type": "file-existence",
+      "type": "file",
       "severity": "error",
+      "state": "present",
       "files": ["README.md", "LICENSE"]
     },
     {
@@ -67,13 +68,17 @@ override discovery.
 Every rule accepts a `severity`: `"error"` (default, fails the run),
 `"warn"` (reported but exit code stays 0), or `"off"` (skipped).
 
-**`file-existence`** — fails if any listed file is missing.
+**`file`** — checks whether listed files exist, Ansible-`file`-module style:
+`state: "present"` (default) fails if any file is missing; `state: "absent"`
+fails if any file exists.
 
 ```jsonc
-{ "type": "file-existence", "severity": "error", "files": ["README.md"] }
+{ "type": "file", "state": "present", "files": ["README.md"] }
+{ "type": "file", "state": "absent", "files": ["yarn.lock"] }
 ```
 
 **`json-match`** — fails unless `key` (dot-separated path) in `file` equals
+`expected`. Set `negate: true` to instead fail when it *does* equal
 `expected`.
 
 ```jsonc

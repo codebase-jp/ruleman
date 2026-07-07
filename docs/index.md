@@ -32,8 +32,9 @@ npx ruleman        # runs the checks
   "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
   "rules": [
     {
-      "type": "file-existence",
+      "type": "file",
       "severity": "error",
+      "state": "present",
       "files": ["README.md", "LICENSE"]
     },
     {
@@ -70,21 +71,27 @@ Every rule accepts a `severity`:
 - `"warn"` — reported, but the run still exits `0`.
 - `"off"` — the rule is skipped entirely.
 
-### `file-existence`
+### `file`
 
-Fails if any listed file is missing.
+Named and shaped after Ansible's `file` module: checks file presence via a
+`state` attribute rather than inventing a mirror rule type for the negated
+case.
 
 ```jsonc
-{ "type": "file-existence", "severity": "error", "files": ["README.md"] }
+{ "type": "file", "state": "present", "files": ["README.md"] }
+{ "type": "file", "state": "absent", "files": ["yarn.lock"] }
 ```
 
-| Field   | Type       | Required | Description                             |
-| ------- | ---------- | -------- | ---------------------------------------- |
-| `files` | `string[]` | yes      | Paths that must exist (repo-relative).  |
+| Field   | Type                      | Required | Description                                                        |
+| ------- | ------------------------- | -------- | ------------------------------------------------------------------ |
+| `files` | `string[]`                | yes      | Paths to check (repo-relative).                                    |
+| `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing; `"absent"` fails if found. |
 
 ### `json-match`
 
-Fails unless `key` (a dot-separated path) in `file` equals `expected`.
+Fails unless `key` (a dot-separated path) in `file` equals `expected`. Set
+`negate: true` to invert the check — fail when it *does* equal `expected`
+— instead of adding a separate `json-not-match` rule type.
 
 ```jsonc
 {
@@ -95,11 +102,12 @@ Fails unless `key` (a dot-separated path) in `file` equals `expected`.
 }
 ```
 
-| Field      | Type     | Required | Description                                  |
-| ---------- | -------- | -------- | ---------------------------------------------- |
-| `file`     | `string` | yes      | Path to a JSON file.                          |
-| `key`      | `string` | yes      | Dot-separated path into the JSON document.    |
-| `expected` | any      | yes      | The value `key` must equal.                   |
+| Field      | Type      | Required | Description                                                      |
+| ---------- | --------- | -------- | ---------------------------------------------------------------- |
+| `file`     | `string`  | yes      | Path to a JSON file.                                             |
+| `key`      | `string`  | yes      | Dot-separated path into the JSON document.                       |
+| `expected` | any       | yes      | The value `key` is compared against.                             |
+| `negate`   | `boolean` | no       | `false` (default) requires equality; `true` requires inequality. |
 
 ### `extends`
 
@@ -109,7 +117,7 @@ Share rules across repos or config files:
 // ruleman.json
 {
   "extends": ["./base.ruleman.json"],
-  "rules": [{ "type": "file-existence", "files": ["CHANGELOG.md"] }]
+  "rules": [{ "type": "file", "files": ["CHANGELOG.md"] }]
 }
 ```
 

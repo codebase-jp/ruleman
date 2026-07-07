@@ -11,8 +11,9 @@ const INIT_TEMPLATE: &str = r#"{
   "$schema": "https://codebase-jp.github.io/ruleman/schema.json",
   "rules": [
     {
-      "type": "file-existence",
+      "type": "file",
       "severity": "error",
+      "state": "present",
       "files": ["README.md", "LICENSE"]
     }
   ]
@@ -53,19 +54,31 @@ enum Severity {
     Off,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum FileState {
+    #[default]
+    Present,
+    Absent,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Rule {
-    #[serde(rename = "file-existence")]
-    FileExistence {
+    #[serde(rename = "file")]
+    File {
         #[serde(default)]
         severity: Severity,
+        #[serde(default)]
+        state: FileState,
         files: Vec<String>,
     },
     #[serde(rename = "json-match")]
     JsonMatch {
         #[serde(default)]
         severity: Severity,
+        #[serde(default)]
+        negate: bool,
         file: String,
         key: String,
         expected: Value,
@@ -204,21 +217,35 @@ fn run_config(config: Config) -> i32 {
 
     for rule in config.rules {
         match rule {
-            Rule::FileExistence { severity, files } => {
+            Rule::File {
+                severity,
+                state,
+                files,
+            } => {
                 if severity == Severity::Off {
                     continue;
                 }
                 for file in files {
-                    if !Path::new(&file).exists() {
-                        has_errors |= report(
-                            severity,
-                            &format!("[ruleman] 必須ファイル '{}' が見つかりません。", file),
-                        );
+                    let exists = Path::new(&file).exists();
+                    let message = match state {
+                        FileState::Present if !exists => Some(format!(
+                            "[ruleman] 必須ファイル '{}' が見つかりません。",
+                            file
+                        )),
+                        FileState::Absent if exists => Some(format!(
+                            "[ruleman] 存在してはいけないファイル '{}' が見つかりました。",
+                            file
+                        )),
+                        _ => None,
+                    };
+                    if let Some(message) = message {
+                        has_errors |= report(severity, &message);
                     }
                 }
             }
             Rule::JsonMatch {
                 severity,
+                negate,
                 file,
                 key,
                 expected,
@@ -251,7 +278,8 @@ fn run_config(config: Config) -> i32 {
                     }
                 };
 
-                if !json_key_matches(&json, &key, &expected) {
+                let matches = json_key_matches(&json, &key, &expected);
+                if matches == negate {
                     has_errors |= report_at(severity, &file, &fail());
                 }
             }
@@ -381,7 +409,7 @@ mod tests {
         let text = r#"{
             // a comment
             "rules": [
-                { "type": "file-existence", "files": ["README.md"], },
+                { "type": "file", "files": ["README.md"], },
             ],
         }"#;
         let config = parse_config_text(text).unwrap();
@@ -389,11 +417,30 @@ mod tests {
     }
 
     #[test]
-    fn severity_defaults_to_error() {
-        let text = r#"{ "rules": [ { "type": "file-existence", "files": [] } ] }"#;
+    fn severity_and_state_default() {
+        let text = r#"{ "rules": [ { "type": "file", "files": [] } ] }"#;
         let config = parse_config_text(text).unwrap();
         match &config.rules[0] {
-            Rule::FileExistence { severity, .. } => assert_eq!(*severity, Severity::Error),
+            Rule::File {
+                severity, state, ..
+            } => {
+                assert_eq!(*severity, Severity::Error);
+                assert_eq!(*state, FileState::Present);
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn negate_defaults_to_false() {
+        let text = r#"{
+            "rules": [
+                { "type": "json-match", "file": "x.json", "key": "a", "expected": true }
+            ]
+        }"#;
+        let config = parse_config_text(text).unwrap();
+        match &config.rules[0] {
+            Rule::JsonMatch { negate, .. } => assert!(!negate),
             _ => panic!("unexpected rule"),
         }
     }
