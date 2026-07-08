@@ -151,8 +151,56 @@ fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
     })
 }
 
+/// Joins `file` onto `base_dir`, unless `base_dir` is empty (a config file
+/// with no directory component, e.g. plain `ruleman.json` in the cwd), in
+/// which case `file` is left untouched to avoid a cosmetic `./` prefix.
+fn join_relative(base_dir: &Path, file: &str) -> String {
+    if base_dir.as_os_str().is_empty() {
+        file.to_string()
+    } else {
+        base_dir.join(file).to_string_lossy().into_owned()
+    }
+}
+
+/// Rewrites a rule's file-path fields to be relative to the config file that
+/// declared it, so checks behave the same regardless of the directory
+/// `ruleman` is invoked from (matters once `extends` or upward config
+/// discovery puts the config file somewhere other than the cwd).
+fn resolve_rule_paths(rule: Rule, base_dir: &Path) -> Rule {
+    match rule {
+        Rule::File {
+            severity,
+            state,
+            files,
+        } => Rule::File {
+            severity,
+            state,
+            files: files
+                .into_iter()
+                .map(|f| join_relative(base_dir, &f))
+                .collect(),
+        },
+        Rule::Content {
+            severity,
+            format,
+            state,
+            file,
+            key,
+            expected,
+        } => Rule::Content {
+            severity,
+            format,
+            state,
+            file: join_relative(base_dir, &file),
+            key,
+            expected,
+        },
+    }
+}
+
 /// Resolves `extends` recursively (relative to each config file's own directory),
 /// concatenating rules from extended configs first, followed by the file's own rules.
+/// Every rule's file paths are resolved relative to the config file that declared them.
 fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Config, String> {
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(canonical.clone()) {
@@ -171,24 +219,37 @@ fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Config, St
         let extended = load_config(&extended_path, visited)?;
         rules.extend(extended.rules);
     }
-    rules.extend(raw.rules);
+    rules.extend(
+        raw.rules
+            .into_iter()
+            .map(|rule| resolve_rule_paths(rule, base_dir)),
+    );
 
     Ok(Config { rules })
 }
 
-/// Searches for a config file starting in `dir`, then walking up parent directories.
-fn discover_config(start_dir: &Path) -> Option<PathBuf> {
-    let mut current = Some(start_dir);
-    while let Some(dir) = current {
+/// Searches for a config file in the current directory, then walking up parent
+/// directories. Kept relative (`ruleman.json`, `../ruleman.json`, ...) rather
+/// than resolved to an absolute path, so rule file paths resolved relative to
+/// it (see `join_relative`) stay short in the common case where the config
+/// file lives in the cwd.
+fn discover_config() -> Option<PathBuf> {
+    let mut dir = PathBuf::new();
+    loop {
         for candidate in CONFIG_CANDIDATES {
             let path = dir.join(candidate);
             if path.exists() {
                 return Some(path);
             }
         }
-        current = dir.parent();
+        let probe = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir.as_path()
+        };
+        fs::canonicalize(probe).ok()?.parent()?;
+        dir.push("..");
     }
-    None
 }
 
 fn get_value_by_dotted_key<'a>(root: &'a Value, dotted_key: &str) -> Option<&'a Value> {
@@ -322,17 +383,15 @@ fn run_config(config: Config) -> i32 {
 fn run(config_arg: Option<&str>) -> i32 {
     let config_path = match config_arg {
         Some(path) => PathBuf::from(path),
-        None => {
-            match discover_config(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
-                Some(path) => path,
-                None => {
-                    eprintln!(
-                        "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
-                    );
-                    return 1;
-                }
+        None => match discover_config() {
+            Some(path) => path,
+            None => {
+                eprintln!(
+                    "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
+                );
+                return 1;
             }
-        }
+        },
     };
 
     let mut visited = HashSet::new();
@@ -471,5 +530,42 @@ mod tests {
             }
             _ => panic!("unexpected rule"),
         }
+    }
+
+    #[test]
+    fn join_relative_with_empty_base_dir_is_unchanged() {
+        assert_eq!(join_relative(Path::new(""), "README.md"), "README.md");
+    }
+
+    #[test]
+    fn join_relative_joins_with_nonempty_base_dir() {
+        assert_eq!(
+            join_relative(Path::new("/tmp/proj"), "README.md"),
+            "/tmp/proj/README.md"
+        );
+    }
+
+    #[test]
+    fn file_rule_paths_resolve_relative_to_config_file_location() {
+        let dir = std::env::temp_dir().join("ruleman_test_relative_paths");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("ruleman.json");
+        fs::write(
+            &config_path,
+            r#"{ "rules": [ { "type": "file", "files": ["README.md"] } ] }"#,
+        )
+        .unwrap();
+
+        let mut visited = HashSet::new();
+        let config = load_config(&config_path, &mut visited).unwrap();
+        match &config.rules[0] {
+            Rule::File { files, .. } => {
+                assert_eq!(files[0], dir.join("README.md").to_string_lossy());
+            }
+            _ => panic!("unexpected rule"),
+        }
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

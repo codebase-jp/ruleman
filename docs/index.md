@@ -133,6 +133,14 @@ Rules from extended files run first, in the order listed, followed by the
 file's own rules. `extends` paths are resolved relative to the file that
 declares them, and circular references are rejected with an error.
 
+### Path resolution
+
+`file`'s `files`, `content`'s `file`, and `extends` paths are all resolved
+relative to the config file that declares them — not the directory
+`ruleman` is invoked from. This keeps results consistent whether you run
+`ruleman` from the repo root, from a subdirectory (via upward config
+discovery), or via `extends` pulling in rules defined in another directory.
+
 ### Comments and trailing commas
 
 Config files are parsed as JSONC, so comments (`//`, `/* */`) and trailing

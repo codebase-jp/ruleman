@@ -93,6 +93,11 @@ the parser (currently `"json"`; `yaml`/`toml` planned). `state: "match"`
 }
 ```
 
+All file paths (`file`'s `files`, `content`'s `file`, and `extends`) are
+resolved relative to the config file that declares them — not the
+directory `ruleman` is run from — so results don't change depending on
+where you invoke it.
+
 Config files may use comments and trailing commas (JSONC).
 
 ## CLI
