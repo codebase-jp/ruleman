@@ -539,10 +539,9 @@ mod tests {
 
     #[test]
     fn join_relative_joins_with_nonempty_base_dir() {
-        assert_eq!(
-            join_relative(Path::new("/tmp/proj"), "README.md"),
-            "/tmp/proj/README.md"
-        );
+        let base = Path::new("some").join("proj");
+        let expected = base.join("README.md").to_string_lossy().into_owned();
+        assert_eq!(join_relative(&base, "README.md"), expected);
     }
 
     #[test]
