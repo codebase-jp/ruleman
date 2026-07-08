@@ -88,6 +88,19 @@ enum Rule {
         state: FileState,
         files: Vec<String>,
     },
+    #[serde(rename = "directory")]
+    Directory {
+        #[serde(default)]
+        severity: Severity,
+        #[serde(default)]
+        state: FileState,
+        directories: Vec<String>,
+        /// Only checked when `state` is `present` and the path is confirmed
+        /// to be a directory: `true` requires zero entries, `false` requires
+        /// at least one. Unset skips the check.
+        #[serde(default)]
+        empty: Option<bool>,
+    },
     #[serde(rename = "content")]
     Content {
         #[serde(default)]
@@ -179,6 +192,20 @@ fn resolve_rule_paths(rule: Rule, base_dir: &Path) -> Rule {
                 .into_iter()
                 .map(|f| join_relative(base_dir, &f))
                 .collect(),
+        },
+        Rule::Directory {
+            severity,
+            state,
+            directories,
+            empty,
+        } => Rule::Directory {
+            severity,
+            state,
+            directories: directories
+                .into_iter()
+                .map(|d| join_relative(base_dir, &d))
+                .collect(),
+            empty,
         },
         Rule::Content {
             severity,
@@ -290,6 +317,32 @@ fn report_at(severity: Severity, file: &str, message: &str) -> bool {
     }
 }
 
+/// Checks a directory's emptiness once it's already confirmed to exist and
+/// be a directory. Returns `None` if `empty` is unset or the check passes.
+fn check_directory_emptiness(path: &Path, display: &str, empty: Option<bool>) -> Option<String> {
+    let want_empty = empty?;
+    let is_empty = match fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) => {
+            return Some(format!(
+                "[ruleman] ディレクトリ '{}' の読み取りに失敗しました: {}",
+                display, e
+            ));
+        }
+    };
+    match (want_empty, is_empty) {
+        (true, false) => Some(format!(
+            "[ruleman] ディレクトリ '{}' は空である必要がありますが、空ではありません。",
+            display
+        )),
+        (false, true) => Some(format!(
+            "[ruleman] ディレクトリ '{}' は空でない必要がありますが、空です。",
+            display
+        )),
+        _ => None,
+    }
+}
+
 fn run_config(config: Config) -> i32 {
     let mut has_errors = false;
 
@@ -304,17 +357,53 @@ fn run_config(config: Config) -> i32 {
                     continue;
                 }
                 for file in files {
-                    let exists = Path::new(&file).exists();
+                    let path = Path::new(&file);
                     let message = match state {
-                        FileState::Present if !exists => Some(format!(
-                            "[ruleman] 必須ファイル '{}' が見つかりません。",
-                            file
-                        )),
-                        FileState::Absent if exists => Some(format!(
+                        FileState::Absent if path.exists() => Some(format!(
                             "[ruleman] 存在してはいけないファイル '{}' が見つかりました。",
                             file
                         )),
+                        FileState::Present if !path.exists() => Some(format!(
+                            "[ruleman] 必須ファイル '{}' が見つかりません。",
+                            file
+                        )),
+                        FileState::Present if !path.is_file() => Some(format!(
+                            "[ruleman] '{}' はファイルである必要がありますが、ディレクトリが存在します。",
+                            file
+                        )),
                         _ => None,
+                    };
+                    if let Some(message) = message {
+                        has_errors |= report(severity, &message);
+                    }
+                }
+            }
+            Rule::Directory {
+                severity,
+                state,
+                directories,
+                empty,
+            } => {
+                if severity == Severity::Off {
+                    continue;
+                }
+                for dir in directories {
+                    let path = Path::new(&dir);
+                    let message = match state {
+                        FileState::Absent if path.exists() => Some(format!(
+                            "[ruleman] 存在してはいけないディレクトリ '{}' が見つかりました。",
+                            dir
+                        )),
+                        FileState::Present if !path.exists() => Some(format!(
+                            "[ruleman] 必須ディレクトリ '{}' が見つかりません。",
+                            dir
+                        )),
+                        FileState::Present if !path.is_dir() => Some(format!(
+                            "[ruleman] '{}' はディレクトリである必要がありますが、ファイルが存在します。",
+                            dir
+                        )),
+                        FileState::Present => check_directory_emptiness(path, &dir, empty),
+                        FileState::Absent => None,
                     };
                     if let Some(message) = message {
                         has_errors |= report(severity, &message);
@@ -513,6 +602,56 @@ mod tests {
             }
             _ => panic!("unexpected rule"),
         }
+    }
+
+    #[test]
+    fn directory_state_and_empty_default() {
+        let text = r#"{ "rules": [ { "type": "directory", "directories": [] } ] }"#;
+        let config = parse_config_text(text).unwrap();
+        match &config.rules[0] {
+            Rule::Directory { state, empty, .. } => {
+                assert_eq!(*state, FileState::Present);
+                assert_eq!(*empty, None);
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn directory_emptiness_check() {
+        let dir = std::env::temp_dir().join("ruleman_test_dir_emptiness");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(check_directory_emptiness(&dir, "d", None), None);
+        assert_eq!(check_directory_emptiness(&dir, "d", Some(true)), None);
+        assert!(check_directory_emptiness(&dir, "d", Some(false)).is_some());
+
+        fs::write(dir.join("file.txt"), "x").unwrap();
+        assert_eq!(check_directory_emptiness(&dir, "d", Some(false)), None);
+        assert!(check_directory_emptiness(&dir, "d", Some(true)).is_some());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_rule_rejects_directory_when_state_is_present() {
+        let dir = std::env::temp_dir().join("ruleman_test_file_vs_dir");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("ruleman.json");
+        fs::write(
+            &config_path,
+            r#"{ "rules": [ { "type": "file", "files": ["a-directory"] } ] }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("a-directory")).unwrap();
+
+        let mut visited = HashSet::new();
+        let config = load_config(&config_path, &mut visited).unwrap();
+        assert_eq!(run_config(config), 1);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -39,12 +39,36 @@
               "type": "string",
               "enum": ["present", "absent"],
               "default": "present",
-              "description": "'present' fails if a listed file is missing; 'absent' fails if it exists."
+              "description": "'present' fails if a listed path is missing or is not a regular file; 'absent' fails if anything exists there."
             },
             "files": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Files to check, relative to the working directory."
+              "description": "Files to check, relative to the config file."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "directories"],
+          "properties": {
+            "type": { "const": "directory" },
+            "severity": { "$ref": "#/definitions/severity" },
+            "state": {
+              "type": "string",
+              "enum": ["present", "absent"],
+              "default": "present",
+              "description": "'present' fails if a listed path is missing or is not a directory; 'absent' fails if anything exists there."
+            },
+            "empty": {
+              "type": "boolean",
+              "description": "If set, additionally requires zero (true) or at least one (false) entries. Only checked when state is 'present'."
+            },
+            "directories": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Directories to check, relative to the config file."
             }
           }
         },

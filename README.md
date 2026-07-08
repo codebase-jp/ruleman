@@ -69,13 +69,23 @@ override discovery.
 Every rule accepts a `severity`: `"error"` (default, fails the run),
 `"warn"` (reported but exit code stays 0), or `"off"` (skipped).
 
-**`file`** — checks whether listed files exist, Ansible-`file`-module style:
-`state: "present"` (default) fails if any file is missing; `state: "absent"`
-fails if any file exists.
+**`file`** — checks whether listed paths exist **as regular files**,
+Ansible-`file`-module style: `state: "present"` (default) fails if any is
+missing or is actually a directory; `state: "absent"` fails if any exists
+(as anything).
 
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
 { "type": "file", "state": "absent", "files": ["yarn.lock"] }
+```
+
+**`directory`** — same idea, for directories. `empty` optionally requires
+the directory to have zero (`true`) or at least one (`false`) entries;
+omit it to skip the check.
+
+```jsonc
+{ "type": "directory", "state": "present", "directories": [".github/workflows"] }
+{ "type": "directory", "directories": ["dist"], "empty": false }
 ```
 
 **`content`** — checks a value inside a structured file. `format` selects
@@ -93,10 +103,10 @@ the parser (currently `"json"`; `yaml`/`toml` planned). `state: "match"`
 }
 ```
 
-All file paths (`file`'s `files`, `content`'s `file`, and `extends`) are
-resolved relative to the config file that declares them — not the
-directory `ruleman` is run from — so results don't change depending on
-where you invoke it.
+All file paths (`file`'s `files`, `directory`'s `directories`, `content`'s
+`file`, and `extends`) are resolved relative to the config file that
+declares them — not the directory `ruleman` is run from — so results
+don't change depending on where you invoke it.
 
 Config files may use comments and trailing commas (JSONC).
 

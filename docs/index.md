@@ -76,17 +76,37 @@ Every rule accepts a `severity`:
 
 Named and shaped after Ansible's `file` module: checks file presence via a
 `state` attribute rather than inventing a mirror rule type for the negated
-case.
+case. `state: "present"` requires the path to exist **and be a regular
+file** — a directory with the same name does not satisfy it.
 
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
 { "type": "file", "state": "absent", "files": ["yarn.lock"] }
 ```
 
-| Field   | Type                      | Required | Description                                                        |
-| ------- | ------------------------- | -------- | ------------------------------------------------------------------ |
-| `files` | `string[]`                | yes      | Paths to check (repo-relative).                                    |
-| `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing; `"absent"` fails if found. |
+| Field   | Type                      | Required | Description                                                                                              |
+| ------- | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `files` | `string[]`                | yes      | Paths to check (repo-relative).                                                                          |
+| `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a regular file; `"absent"` fails if anything exists there. |
+
+### `directory`
+
+The same idea as `file`, for directories — kept as a separate rule type
+rather than folded into `file` because file/directory are genuinely
+different things to check (not a superficial present/absent-style
+variation), and future directory-specific attributes (like `empty` below)
+shouldn't leak into `file`'s schema.
+
+```jsonc
+{ "type": "directory", "state": "present", "directories": [".github/workflows"] }
+{ "type": "directory", "directories": ["dist"], "empty": false }
+```
+
+| Field         | Type                      | Required | Description                                                                                                            |
+| ------------- | ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `directories` | `string[]`                | yes      | Paths to check (repo-relative).                                                                                        |
+| `state`       | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a directory; `"absent"` fails if anything exists there.                  |
+| `empty`       | `boolean`                 | no       | If set, additionally requires zero (`true`) or at least one (`false`) entries. Only checked when `state` is `present`. |
 
 ### `content`
 
