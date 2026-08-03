@@ -11,7 +11,19 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
 
 ## Repo layout
 
-- `src/main.rs` — the whole CLI (config parsing, rule engine, subcommands).
+- `src/` — one module per responsibility; keep new code in the module that
+  owns the concern rather than growing `main.rs` back into the whole CLI:
+  - `main.rs` — the clap CLI definition and dispatch, nothing else.
+  - `rule.rs` — the rule types a config can declare, plus `validate_rule`.
+  - `config.rs` — finding, parsing and resolving config files (`extends`,
+    rule paths relative to the declaring file).
+  - `check.rs` — the check engine: runs each rule, reports failures.
+  - `checksum.rs` — hashing files and the algorithms `checksum` can name.
+  - `config_edit.rs` — rewriting a config file's *text* via the JSONC CST so
+    comments and formatting survive. Pure: no filesystem access.
+  - `add.rs` / `init.rs` — one module per subcommand, each exposing `run`.
+  - `testdata.rs` — `#[cfg(test)]` fixtures shared across modules.
+  Tests live in a `#[cfg(test)] mod tests` inside the module they cover.
 - `npm/ruleman/` — the main npm package (`ruleman`); `bin/ruleman.js` resolves
   and spawns the right platform binary.
 - `npm/platforms/<os-arch>/` — one npm package per target platform; binaries
