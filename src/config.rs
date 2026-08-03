@@ -386,7 +386,13 @@ mod tests {
         match &config.rules[0] {
             Rule::File { files, .. } => {
                 assert!(!files[0].contains("node_modules"), "{:?}", files);
-                assert!(files[0].ends_with("web/LICENSE"), "{:?}", files);
+                // Compared as a path, not a string: the separator is `\` on
+                // Windows, and `Path::ends_with` matches whole components.
+                assert!(
+                    Path::new(&files[0]).ends_with(Path::new("web/LICENSE")),
+                    "{:?}",
+                    files
+                );
             }
             _ => panic!("unexpected rule"),
         }
