@@ -118,7 +118,8 @@
             "file": { "type": "string", "description": "Path to the file to hash." },
             "expected": {
               "type": "string",
-              "description": "Hex digest, compared case-insensitively. Record it with 'ruleman add --checksum <file>'."
+              "pattern": "^\\s*[0-9a-fA-F]{64}\\s*$",
+              "description": "Bare hex digest of the algorithm's width (64 chars for sha256, no 'sha256:' prefix), compared case-insensitively. Record it with 'ruleman add --checksum <file>'."
             }
           }
         }

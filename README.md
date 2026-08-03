@@ -127,6 +127,12 @@ results don't change depending on where you invoke it.
 
 Config files may use comments and trailing commas (JSONC).
 
+The config is validated before any check runs. Unknown attributes are an
+error rather than silently ignored — a typo like `"stat": "absent"` would
+otherwise leave a rule quietly checking less than intended — as are malformed
+values such as a `checksum` `expected` that isn't a bare 64-character hex
+digest. Failures name the rule by index: `rules[2]: unknown field ...`.
+
 ## CLI
 
 ```text

@@ -54,6 +54,31 @@ check, not genuinely different checks:
 - Keep axes that can vary independently (e.g. `content`'s `format` vs.
   `state`) as separate attributes rather than cross-producing them into one
   enum (no `state: "json-match" | "json-mismatch" | "yaml-match" | ...`).
+- Comparison-style rules decompose into independent axes: *what* is compared
+  (the rule type — a key inside a parsed document vs. the whole file's
+  digest), *how the reference is supplied* (`checksum`'s `algorithm`,
+  `content`'s `format`, and later a URL source), *where the target lives*
+  (`file` today; a `url` locator would be a shared attribute, not a new rule
+  type), and *direction* (`state`). `state: "match" | "mismatch"` is the
+  shared direction axis — no rule type owns the word `match`, and new ways of
+  specifying the comparison never extend it.
+- Don't add a discriminator attribute naming which of those forms is in use
+  (no `source: "literal" | "url"`, no `expected_type: "hash" | "json"`).
+  Give each form its own attribute (`expected` vs. `expected_url`) and
+  enforce exactly-one-of instead, the way Ansible declares mutually exclusive
+  params instead of a mode enum. A discriminator is only needed when one
+  attribute has to carry several kinds of value — which is the thing to avoid
+  in the first place.
+- Specifying both sides of a mutually exclusive pair is an error, never an
+  AND: the two attributes fill the same slot, so honouring one silently would
+  run a check the author didn't ask for. Enforce it in **both** places —
+  `oneOf`/`required` in `docs/schema.json` (editor feedback) and
+  `validate_rule` in `src/main.rs` (the CLI never reads the schema). Anything
+  serde's derives can't express — cross-attribute constraints, value formats
+  like `checksum`'s hex digest — belongs in `validate_rule`, which runs per
+  rule at load time and reports failures as `rules[<index>]: <reason>`.
+  Attributes themselves are strict: `Rule` is `deny_unknown_fields`, so a
+  typo is an error rather than a silently ignored attribute.
 
 ## Local dev
 

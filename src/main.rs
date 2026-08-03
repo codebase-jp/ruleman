@@ -129,10 +129,21 @@ impl ChecksumAlgorithm {
             ChecksumAlgorithm::Sha256 => "sha256",
         }
     }
+
+    /// Length of this algorithm's digest written as hex.
+    fn hex_width(self) -> usize {
+        match self {
+            ChecksumAlgorithm::Sha256 => 64,
+        }
+    }
 }
 
+/// `deny_unknown_fields` makes a misspelled or not-yet-supported attribute an
+/// error instead of a silently ignored one — a typo'd attribute would
+/// otherwise quietly weaken the check it was meant to tighten. It matches
+/// `additionalProperties: false` in `docs/schema.json`.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 enum Rule {
     #[serde(rename = "file")]
     File {
@@ -181,14 +192,23 @@ enum Rule {
     },
 }
 
+/// The config file's own fields, with `rules` left unparsed so each rule can
+/// be deserialized separately and reported with its index when it's malformed.
 #[derive(Debug, Deserialize, Default)]
-struct RawConfig {
+#[serde(deny_unknown_fields)]
+struct RawScaffold {
     #[serde(default, rename = "$schema")]
     #[allow(dead_code)]
     schema: Option<String>,
     #[serde(default)]
     extends: Vec<String>,
     #[serde(default)]
+    rules: Vec<Value>,
+}
+
+#[derive(Debug, Default)]
+struct RawConfig {
+    extends: Vec<String>,
     rules: Vec<Rule>,
 }
 
@@ -197,12 +217,52 @@ struct Config {
 }
 
 fn parse_config_text(raw: &str) -> Result<RawConfig, String> {
-    jsonc_parser::parse_to_serde_value(raw, &jsonc_parser::ParseOptions::default())
-        .map_err(|e| e.to_string())
-        .and_then(|value| {
-            let value = value.unwrap_or(Value::Object(Default::default()));
-            serde_json::from_value(value).map_err(|e| e.to_string())
+    let value = jsonc_parser::parse_to_serde_value(raw, &jsonc_parser::ParseOptions::default())
+        .map_err(|e| e.to_string())?
+        .unwrap_or(Value::Object(Default::default()));
+
+    let scaffold: RawScaffold = serde_json::from_value(value).map_err(|e| e.to_string())?;
+
+    let rules = scaffold
+        .rules
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            serde_json::from_value::<Rule>(value)
+                .map_err(|e| e.to_string())
+                .and_then(|rule| validate_rule(&rule).map(|()| rule))
+                .map_err(|e| format!("rules[{}]: {}", index, e))
         })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(RawConfig {
+        extends: scaffold.extends,
+        rules,
+    })
+}
+
+/// Cross-attribute checks serde can't express on its own. Mutually exclusive
+/// attributes (a future `url` locator vs. `file`, `expected` vs. a URL the
+/// reference is fetched from) get rejected here too, rather than silently
+/// picking one.
+fn validate_rule(rule: &Rule) -> Result<(), String> {
+    if let Rule::Checksum {
+        algorithm,
+        expected,
+        ..
+    } = rule
+    {
+        let digest = expected.trim();
+        if digest.len() != algorithm.hex_width() || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "'expected' は {} のダイジェストを16進{}文字で指定してください: '{}'",
+                algorithm.as_str(),
+                algorithm.hex_width(),
+                expected
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
@@ -1286,6 +1346,73 @@ mod tests {
     }
 
     #[test]
+    fn unknown_attributes_are_rejected() {
+        // A typo'd attribute is silently ignored by default, which would let a
+        // rule pass while checking less than the author intended.
+        let error = parse_config_text(
+            r#"{ "rules": [ { "type": "file", "files": ["a"], "stat": "absent" } ] }"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("rules[0]"), "{}", error);
+        assert!(error.contains("stat"), "{}", error);
+
+        // Attributes belonging to another rule type don't leak in either.
+        assert!(
+            parse_config_text(r#"{ "rules": [ { "type": "file", "files": ["a"], "key": "x" } ] }"#)
+                .is_err()
+        );
+
+        // ...nor unknown top-level fields.
+        assert!(parse_config_text(r#"{ "rulez": [] }"#).is_err());
+
+        // The `type` tag itself is not treated as an unknown field.
+        assert!(parse_config_text(r#"{ "rules": [ { "type": "file", "files": [] } ] }"#).is_ok());
+    }
+
+    #[test]
+    fn a_malformed_rule_is_reported_with_its_index() {
+        let error = parse_config_text(
+            r#"{
+                "rules": [
+                    { "type": "file", "files": ["a"] },
+                    { "type": "directory", "directories": ["b"] },
+                    { "type": "content", "file": "c.json", "expected": 1 }
+                ]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("rules[2]"), "{}", error);
+        assert!(error.contains("key"), "{}", error);
+    }
+
+    #[test]
+    fn checksum_expected_must_be_a_well_formed_digest() {
+        let cases = [
+            "",
+            "abc123",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ];
+        for expected in cases {
+            let text = format!(
+                r#"{{ "rules": [ {{ "type": "checksum", "file": "a", "expected": "{}" }} ] }}"#,
+                expected
+            );
+            let error = parse_config_text(&text)
+                .err()
+                .unwrap_or_else(|| panic!("expected '{}' to be rejected", expected));
+            assert!(error.contains("rules[0]"), "{}", error);
+        }
+
+        // Surrounding whitespace and uppercase hex are both fine.
+        let text = format!(
+            r#"{{ "rules": [ {{ "type": "checksum", "file": "a", "expected": "  {}  " }} ] }}"#,
+            DIGEST_ABC.to_uppercase()
+        );
+        assert!(parse_config_text(&text).is_ok());
+    }
+
+    #[test]
     fn join_relative_with_empty_base_dir_is_unchanged() {
         assert_eq!(join_relative(Path::new(""), "README.md"), "README.md");
     }
@@ -1296,6 +1423,11 @@ mod tests {
         let expected = base.join("README.md").to_string_lossy().into_owned();
         assert_eq!(join_relative(&base, "README.md"), expected);
     }
+
+    /// SHA-256 of "abc".
+    const DIGEST_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    /// A well-formed digest that no real file has.
+    const DIGEST_ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     fn existence(kind: PathKind, path: &str) -> AddEntry {
         AddEntry::Existence {
@@ -1436,7 +1568,7 @@ mod tests {
     fn add_checksum_creates_a_rule_with_the_recorded_digest() {
         let outcome = add_entries_to_config_text(
             "{}",
-            &[checksum_entry("vendor/lib.js", "abc123")],
+            &[checksum_entry("vendor/lib.js", DIGEST_ABC)],
             Severity::Error,
         )
         .unwrap();
@@ -1455,7 +1587,7 @@ mod tests {
                 assert_eq!(*algorithm, ChecksumAlgorithm::Sha256);
                 assert_eq!(*state, MatchState::Match);
                 assert_eq!(file, "vendor/lib.js");
-                assert_eq!(expected, "abc123");
+                assert_eq!(expected, DIGEST_ABC);
             }
             _ => panic!("unexpected rule"),
         }
@@ -1463,15 +1595,18 @@ mod tests {
 
     #[test]
     fn add_checksum_refreshes_a_stale_digest_in_place() {
-        let text = r#"{
+        let text = format!(
+            r#"{{
   "rules": [
     // pinned by hand
-    { "type": "checksum", "file": "vendor/lib.js", "expected": "old" }
+    {{ "type": "checksum", "file": "vendor/lib.js", "expected": "{}" }}
   ]
-}"#;
+}}"#,
+            DIGEST_ZEROS
+        );
         let outcome = add_entries_to_config_text(
-            text,
-            &[checksum_entry("vendor/lib.js", "new")],
+            &text,
+            &[checksum_entry("vendor/lib.js", DIGEST_ABC)],
             Severity::Error,
         )
         .unwrap();
@@ -1481,17 +1616,23 @@ mod tests {
         let config = parse_config_text(&outcome.text).unwrap();
         assert_eq!(config.rules.len(), 1);
         match &config.rules[0] {
-            Rule::Checksum { expected, .. } => assert_eq!(expected, "new"),
+            Rule::Checksum { expected, .. } => assert_eq!(expected, DIGEST_ABC),
             _ => panic!("unexpected rule"),
         }
     }
 
     #[test]
     fn add_checksum_skips_an_unchanged_digest() {
-        let text = r#"{ "rules": [ { "type": "checksum", "file": "a.txt", "expected": "ABC" } ] }"#;
-        let outcome =
-            add_entries_to_config_text(text, &[checksum_entry("a.txt", "abc")], Severity::Error)
-                .unwrap();
+        let text = format!(
+            r#"{{ "rules": [ {{ "type": "checksum", "file": "a.txt", "expected": "{}" }} ] }}"#,
+            DIGEST_ABC.to_uppercase()
+        );
+        let outcome = add_entries_to_config_text(
+            &text,
+            &[checksum_entry("a.txt", DIGEST_ABC)],
+            Severity::Error,
+        )
+        .unwrap();
 
         assert_eq!(outcome.results, vec![AddResult::Skipped]);
         assert!(!outcome.changed());
@@ -1499,14 +1640,17 @@ mod tests {
 
     #[test]
     fn add_checksum_leaves_a_mismatch_rule_alone() {
-        let text = r#"{
+        let text = format!(
+            r#"{{
             "rules": [
-                { "type": "checksum", "state": "mismatch", "file": "a.txt", "expected": "banned" }
+                {{ "type": "checksum", "state": "mismatch", "file": "a.txt", "expected": "{}" }}
             ]
-        }"#;
+        }}"#,
+            DIGEST_ZEROS
+        );
         let outcome = add_entries_to_config_text(
-            text,
-            &[checksum_entry("a.txt", "current")],
+            &text,
+            &[checksum_entry("a.txt", DIGEST_ABC)],
             Severity::Error,
         )
         .unwrap();
@@ -1519,7 +1663,7 @@ mod tests {
                 state, expected, ..
             } => {
                 assert_eq!(*state, MatchState::Mismatch);
-                assert_eq!(expected, "banned");
+                assert_eq!(expected, DIGEST_ZEROS);
             }
             _ => panic!("unexpected rule"),
         }
@@ -1527,10 +1671,11 @@ mod tests {
 
     #[test]
     fn checksum_rule_defaults_and_hashing() {
-        let text = r#"{
-            "rules": [ { "type": "checksum", "file": "a.txt", "expected": "x" } ]
-        }"#;
-        let config = parse_config_text(text).unwrap();
+        let text = format!(
+            r#"{{ "rules": [ {{ "type": "checksum", "file": "a.txt", "expected": "{}" }} ] }}"#,
+            DIGEST_ABC
+        );
+        let config = parse_config_text(&text).unwrap();
         match &config.rules[0] {
             Rule::Checksum {
                 algorithm, state, ..

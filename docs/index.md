@@ -198,6 +198,31 @@ discovery), or via `extends` pulling in rules defined in another directory.
 Config files are parsed as JSONC, so comments (`//`, `/* */`) and trailing
 commas are allowed.
 
+### Config validation
+
+The config is validated before any check runs, and anything it can't make
+sense of is an error rather than something quietly ignored:
+
+- **Unknown attributes are rejected.** A misspelled attribute would otherwise
+  be dropped, leaving a rule that passes while checking less than intended —
+  `{ "type": "file", "files": ["a"], "stat": "absent" }` looks like it
+  forbids the file but would silently require it. This mirrors
+  `additionalProperties: false` in the JSON Schema, so editors and the CLI
+  agree.
+- **Malformed values are rejected**, including `checksum`'s `expected`, which
+  must be a bare hex digest of the algorithm's width (64 characters for
+  sha256 — no `sha256:` prefix, surrounding whitespace and uppercase are
+  fine). A typo'd digest would otherwise surface much later as a confusing
+  hash mismatch.
+- Errors name the offending rule by index:
+
+```text
+::error::[ruleman] 設定ファイル 'ruleman.json' の解析に失敗しました: rules[2]: unknown field `stat`, expected one of `severity`, `state`, `files`
+```
+
+Attributes that fill the same slot are mutually exclusive rather than
+combined — specifying both is an error, not an AND.
+
 ## CLI reference
 
 ```text
