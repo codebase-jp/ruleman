@@ -88,6 +88,21 @@ jobs:
       - name: Derive version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
+      # Runs before anything is published: a tag without its CHANGELOG section
+      # should fail while the release is still fully reversible.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\]" { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section" >&2
+            exit 1
+          fi
+          cat release-notes.md
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -147,8 +162,11 @@ jobs:
           cp npm/platforms/darwin-arm64/ruleman dist/ruleman-darwin-arm64
           cp npm/platforms/win32-x64-msvc/ruleman.exe dist/ruleman-win32-x64-msvc.exe
 
+      # `body_path` is prepended to the auto-generated commit list, so the
+      # release leads with the curated CHANGELOG section.
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: dist/*

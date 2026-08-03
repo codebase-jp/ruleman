@@ -287,6 +287,12 @@ cargo build --release
 ./target/release/ruleman --version
 ```
 
+## Changelog
+
+[CHANGELOG.md](https://github.com/codebase-jp/ruleman/blob/main/CHANGELOG.md)
+records what changed in each release, including the breaking changes to watch
+for when upgrading.
+
 ## License
 
 [MIT](https://github.com/codebase-jp/ruleman/blob/main/LICENSE) © Codebase Inc.

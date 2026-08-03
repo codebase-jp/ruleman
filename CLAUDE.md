@@ -33,10 +33,17 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
 - `docs/` — GitHub Pages site (`docs/index.md`) and the config JSON Schema
   (`docs/schema.json`), served at `https://ruleman.dev/`.
 - `.github/workflows/ci.yml` — fmt/clippy/test on push and PR.
+- `CHANGELOG.md` — Keep a Changelog format. The `## [X.Y.Z]` section is
+  extracted verbatim as the top of that release's GitHub release notes, so a
+  release needs its section written *before* the tag is pushed (the workflow
+  fails early, before publishing, if it's missing).
 - `.github/workflows/release.yml` — on `vX.Y.Z` tag push: builds all
   platforms natively (no cross-compilation toolchains needed — each matrix
   entry runs on a native runner for its target), then `npm publish`s every
-  package, then creates a GitHub Release.
+  package, then creates a GitHub Release. The tag is the single source of
+  truth for the version — `Cargo.toml` and the `package.json`s stay at
+  `0.1.0` in git and are synced from the tag at release time, so don't commit
+  version bumps.
 
 ## Rule design convention
 
