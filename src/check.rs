@@ -5,7 +5,8 @@ use crate::checksum::file_checksum;
 use crate::config::{Config, load_config, resolve_config_path};
 use crate::output::{Diagnostic, OutputFormat, render};
 use crate::paths::{Target, resolve};
-use crate::rule::{ContentFormat, FileState, MatchState, Rule, Severity};
+use crate::rule::{Comparison, ContentFormat, FileState, MatchState, Rule, Severity};
+use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -22,8 +23,36 @@ pub(crate) fn get_value_by_dotted_key<'a>(root: &'a Value, dotted_key: &str) -> 
     })
 }
 
-pub(crate) fn json_key_matches(root: &Value, key: &str, expected: &Value) -> bool {
-    get_value_by_dotted_key(root, key).is_some_and(|actual| actual == expected)
+/// Whether the value at `key` satisfies `comparison` against `expected`. A
+/// missing key never satisfies anything, whatever the comparison.
+pub(crate) fn json_key_matches(
+    root: &Value,
+    key: &str,
+    comparison: Comparison,
+    expected: &Value,
+) -> bool {
+    get_value_by_dotted_key(root, key).is_some_and(|actual| compare(actual, comparison, expected))
+}
+
+fn compare(actual: &Value, comparison: Comparison, expected: &Value) -> bool {
+    match comparison {
+        Comparison::Equals => actual == expected,
+        Comparison::Contains => match (actual, expected) {
+            (Value::String(haystack), Value::String(needle)) => haystack.contains(needle),
+            (Value::Array(items), needle) => items.contains(needle),
+            // A `contains` against a number or a boolean has no sensible
+            // reading, so it simply doesn't hold.
+            _ => false,
+        },
+        // The pattern compiled at load time (see `validate_rule`), so a failure
+        // here can only mean a non-string value, which cannot match.
+        Comparison::Regex => match (actual.as_str(), expected.as_str()) {
+            (Some(value), Some(pattern)) => {
+                Regex::new(pattern).is_ok_and(|regex| regex.is_match(value))
+            }
+            _ => false,
+        },
+    }
 }
 
 /// Checks a directory's emptiness once it's already confirmed to exist and
@@ -187,6 +216,7 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 severity,
                 format,
                 state,
+                comparison,
                 file,
                 key,
                 expected,
@@ -194,7 +224,9 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 if severity == Severity::Off {
                     continue;
                 }
-                if let Some(message) = check_content(format, state, &file, &key, &expected) {
+                if let Some(message) =
+                    check_content(format, state, comparison, &file, &key, &expected)
+                {
                     diagnostics.push(Diagnostic::new(severity, "content", Some(file), message));
                 }
             }
@@ -258,6 +290,7 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
 fn check_content(
     format: ContentFormat,
     state: MatchState,
+    comparison: Comparison,
     file: &str,
     key: &str,
     expected: &Value,
@@ -290,7 +323,14 @@ fn check_content(
         }
     };
 
-    let matches = json_key_matches(&document, key, expected);
+    let matches = json_key_matches(&document, key, comparison, expected);
+    // `equals` reads naturally as "must be X"; the others need naming, so that
+    // a failure says which comparison was applied rather than implying equality.
+    let requirement = match comparison {
+        Comparison::Equals => format!("must be {}", expected),
+        Comparison::Contains => format!("must contain {}", expected),
+        Comparison::Regex => format!("must match the regex {}", expected),
+    };
     match state {
         MatchState::Match if !matches => {
             let actual = match get_value_by_dotted_key(&document, key) {
@@ -298,13 +338,15 @@ fn check_content(
                 None => "not set".to_string(),
             };
             Some(format!(
-                "'{}' in '{}' must be {}, but it is {}",
-                key, file, expected, actual
+                "'{}' in '{}' {}, but it is {}",
+                key, file, requirement, actual
             ))
         }
         MatchState::Mismatch if matches => Some(format!(
-            "'{}' in '{}' must not be {}, but it is",
-            key, file, expected
+            "'{}' in '{}' must not {}, but it does",
+            key,
+            file,
+            requirement.trim_start_matches("must ")
         )),
         _ => None,
     }
@@ -380,13 +422,51 @@ mod tests {
         assert!(json_key_matches(
             &value,
             "compilerOptions.strict",
+            Comparison::Equals,
             &json!(true)
         ));
         assert!(!json_key_matches(
             &value,
             "compilerOptions.strict",
+            Comparison::Equals,
             &json!(false)
         ));
+    }
+
+    #[test]
+    fn comparisons_beyond_equality() {
+        let value = json!({
+            "engines": { "node": ">=18.0.0" },
+            "workspaces": ["packages/*", "apps/web"],
+            "private": true
+        });
+        let matches =
+            |key: &str, comparison, expected| json_key_matches(&value, key, comparison, &expected);
+
+        // `contains`: substring of a string, element of an array.
+        assert!(matches("engines.node", Comparison::Contains, json!("18")));
+        assert!(!matches("engines.node", Comparison::Contains, json!("20")));
+        assert!(matches(
+            "workspaces",
+            Comparison::Contains,
+            json!("apps/web")
+        ));
+        assert!(!matches(
+            "workspaces",
+            Comparison::Contains,
+            json!("apps/api")
+        ));
+        // Nothing sensible to read into `contains` on a boolean.
+        assert!(!matches("private", Comparison::Contains, json!(true)));
+
+        // `regex` applies to string values only.
+        assert!(matches("engines.node", Comparison::Regex, json!(r"^>=\d+")));
+        assert!(!matches("engines.node", Comparison::Regex, json!(r"^\^")));
+        assert!(!matches("private", Comparison::Regex, json!("true")));
+
+        // A missing key satisfies no comparison.
+        assert!(!matches("engines.bun", Comparison::Contains, json!("1")));
+        assert!(!matches("engines.bun", Comparison::Regex, json!(".*")));
     }
 
     #[test]

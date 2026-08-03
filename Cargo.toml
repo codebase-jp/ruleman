@@ -18,3 +18,4 @@ jsonc-parser = { version = "0.26", features = ["serde", "cst"] }
 sha2 = "0.10"
 ignore = "0.4.32"
 globset = "0.4.19"
+regex = "1.13.1"

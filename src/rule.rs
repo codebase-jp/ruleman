@@ -4,6 +4,7 @@
 use crate::checksum::ChecksumAlgorithm;
 use crate::paths::{compile, is_pattern};
 use clap::ValueEnum;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -47,6 +48,22 @@ impl ContentFormat {
             ContentFormat::Json => "json",
         }
     }
+}
+
+/// How `content` compares the value it found against `expected`. A separate
+/// axis from `state`, which only decides the direction of the assertion: any
+/// comparison can be required to hold or to fail.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Comparison {
+    /// Deep equality with `expected`.
+    #[default]
+    Equals,
+    /// `expected` is a substring of a string value, or an element of an array
+    /// value. Any other combination of types is a failure.
+    Contains,
+    /// `expected` is a regular expression that the string value must match.
+    Regex,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,6 +120,9 @@ pub(crate) enum Rule {
         format: ContentFormat,
         #[serde(default)]
         state: MatchState,
+        /// How the value found at `key` is compared against `expected`.
+        #[serde(default)]
+        comparison: Comparison,
         file: String,
         key: String,
         expected: Value,
@@ -151,6 +171,21 @@ pub(crate) fn validate_rule(rule: &Rule) -> Result<(), String> {
         if is_pattern(pattern) {
             compile(pattern)?;
         }
+    }
+
+    if let Rule::Content {
+        comparison: Comparison::Regex,
+        expected,
+        ..
+    } = rule
+    {
+        let Some(pattern) = expected.as_str() else {
+            return Err(format!(
+                "'expected' must be a string when comparison is 'regex', not {}",
+                expected
+            ));
+        };
+        Regex::new(pattern).map_err(|e| format!("invalid regex '{}': {}", pattern, e))?;
     }
 
     if let Rule::Checksum {
