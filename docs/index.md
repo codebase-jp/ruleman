@@ -138,6 +138,37 @@ supported, `format` selects the parser and the rule type itself stays
 | `expected` | any                       | yes      | The value `key` is compared against.                                     |
 | `state`    | `"match"` \| `"mismatch"` | no       | `"match"` (default) requires equality; `"mismatch"` requires inequality. |
 
+### `checksum`
+
+Pins a file's exact bytes by hash — for files that are supposed to change only
+deliberately (vendored bundles, generated output, a CI workflow you don't want
+edited casually). Separate from `content` because it asserts a different thing:
+`content` reads a value out of a parsed document, `checksum` compares the whole
+file's digest and doesn't care about its format.
+
+`state: "match"` (default) fails unless the file's digest equals `expected`;
+`state: "mismatch"` fails when it does (pinning a digest the file must *not*
+have, e.g. a known-bad revision). A missing or unreadable file fails too.
+
+```jsonc
+{
+  "type": "checksum",
+  "algorithm": "sha256",
+  "file": "vendor/lib.js",
+  "expected": "3879a5d930ae1999b278a3a498f7de3fd83ba8dae59330fcfa2db31c103ac21d"
+}
+```
+
+Record the digest with [`ruleman add --checksum`](#add) rather than by hand,
+and re-run the same command to refresh it after an intentional change.
+
+| Field       | Type                      | Required | Description                                                                                   |
+| ----------- | ------------------------- | -------- | --------------------------------------------------------------------------------------------- |
+| `algorithm` | `"sha256"`                | no       | Hash algorithm. `"sha256"` (default); more can be added later.                                |
+| `file`      | `string`                  | yes      | Path to the file to hash.                                                                     |
+| `expected`  | `string`                  | yes      | Hex digest, compared case-insensitively.                                                      |
+| `state`     | `"match"` \| `"mismatch"` | no       | `"match"` (default) requires the digest to equal `expected`; `"mismatch"` requires it not to. |
+
 ### `extends`
 
 Share rules across repos or config files:
@@ -172,7 +203,7 @@ commas are allowed.
 ```text
 ruleman [--config <path>]     # run checks (default command)
 ruleman init [--force]        # scaffold a starter ruleman.json
-ruleman add <path>...         # add existing paths as existence rules
+ruleman add <path>...         # add existing paths as rules
 ruleman --version
 ruleman --help
 ```
@@ -185,6 +216,7 @@ the config to lock in a file that's there today:
 ```sh
 ruleman add README.md .github/workflows   # one file rule, one directory rule
 ruleman add --severity warn CHANGELOG.md
+ruleman add --checksum vendor/lib.js      # pin the file's current hash
 ```
 
 With no options it writes an existence check — `state: "present"` at
@@ -195,6 +227,24 @@ type: a regular file goes into a `file` rule's `files`, a directory into a
 Paths are appended to an existing rule with the same type, `state` and
 `severity` when there is one, otherwise a new rule is appended to `rules`.
 Paths already covered by a matching `present` rule are reported and skipped.
+
+#### `--checksum`
+
+Hashes each file as it is right now and writes a [`checksum`](#checksum) rule
+instead of an existence rule — the recording half of hash pinning, so the
+digest never has to be pasted in by hand:
+
+```sh
+ruleman add --checksum vendor/lib.js schema.graphql
+ruleman add --checksum --algorithm sha256 vendor/lib.js   # sha256 is the default
+```
+
+Directories are rejected. When a `match` rule for the same file and algorithm
+already exists, its `expected` is rewritten in place rather than duplicated —
+so after an intentional edit, re-running the same command is how you refresh
+the pin. Re-running it on an unchanged file reports that and writes nothing.
+`mismatch` rules are never rewritten, since they pin a digest the file must
+*not* have.
 
 Arguments are interpreted relative to the current directory but stored relative
 to the config file (with `/` separators), matching how rule paths resolve at

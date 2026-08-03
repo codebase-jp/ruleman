@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use jsonc_parser::cst::{CstArray, CstInputValue, CstObject, CstRootNode};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,11 +45,15 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Add existing files/directories to the config as existence rules.
+    /// Add existing files/directories to the config as rules.
     ///
     /// Each path must exist; whether it becomes a `file` or a `directory`
     /// rule is decided by what's on disk. Paths are stored relative to the
     /// config file, and comments/formatting in the config are preserved.
+    ///
+    /// With --checksum the file's current hash is recorded as a `checksum`
+    /// rule instead; re-running it after an intentional edit refreshes the
+    /// recorded hash.
     Add {
         /// Paths to add, relative to the current directory.
         #[arg(required = true)]
@@ -57,6 +62,15 @@ enum Command {
         /// Severity of the rule the paths are added to.
         #[arg(long, value_enum, default_value_t = Severity::Error)]
         severity: Severity,
+
+        /// Record each file's current hash as a `checksum` rule instead of an
+        /// existence rule.
+        #[arg(long)]
+        checksum: bool,
+
+        /// Hash algorithm to record with. Defaults to sha256.
+        #[arg(long, value_enum, requires = "checksum")]
+        algorithm: Option<ChecksumAlgorithm>,
     },
 }
 
@@ -102,6 +116,21 @@ enum MatchState {
     Mismatch,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum ChecksumAlgorithm {
+    #[default]
+    Sha256,
+}
+
+impl ChecksumAlgorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChecksumAlgorithm::Sha256 => "sha256",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Rule {
@@ -137,6 +166,18 @@ enum Rule {
         file: String,
         key: String,
         expected: Value,
+    },
+    #[serde(rename = "checksum")]
+    Checksum {
+        #[serde(default)]
+        severity: Severity,
+        #[serde(default)]
+        algorithm: ChecksumAlgorithm,
+        #[serde(default)]
+        state: MatchState,
+        file: String,
+        /// Hex digest, compared case-insensitively.
+        expected: String,
     },
 }
 
@@ -247,6 +288,19 @@ fn resolve_rule_paths(rule: Rule, base_dir: &Path) -> Rule {
             key,
             expected,
         },
+        Rule::Checksum {
+            severity,
+            algorithm,
+            state,
+            file,
+            expected,
+        } => Rule::Checksum {
+            severity,
+            algorithm,
+            state,
+            file: join_relative(base_dir, &file),
+            expected,
+        },
     }
 }
 
@@ -312,6 +366,19 @@ fn get_value_by_dotted_key<'a>(root: &'a Value, dotted_key: &str) -> Option<&'a 
 
 fn json_key_matches(root: &Value, key: &str, expected: &Value) -> bool {
     get_value_by_dotted_key(root, key).is_some_and(|actual| actual == expected)
+}
+
+/// Streams the file through the hasher rather than reading it into memory, so
+/// large tracked artifacts (lockfiles, vendored bundles) don't cost RAM.
+fn file_checksum(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    match algorithm {
+        ChecksumAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher)?;
+            Ok(format!("{:x}", hasher.finalize()))
+        }
+    }
 }
 
 fn report(severity: Severity, message: &str) -> bool {
@@ -483,6 +550,52 @@ fn run_config(config: Config) -> i32 {
                     has_errors |= report_at(severity, &file, &fail());
                 }
             }
+            Rule::Checksum {
+                severity,
+                algorithm,
+                state,
+                file,
+                expected,
+            } => {
+                if severity == Severity::Off {
+                    continue;
+                }
+
+                let actual = match file_checksum(Path::new(&file), algorithm) {
+                    Ok(actual) => actual,
+                    Err(e) => {
+                        let message = format!(
+                            "[ruleman] ファイル '{}' のハッシュを計算できません: {}",
+                            file, e
+                        );
+                        has_errors |= report_at(severity, &file, &message);
+                        continue;
+                    }
+                };
+
+                let expected = expected.trim();
+                let matches = actual.eq_ignore_ascii_case(expected);
+                let message = match state {
+                    MatchState::Match if !matches => Some(format!(
+                        "[ruleman] ファイル '{}' の {} ハッシュが記録と一致しません (期待: {}, 実際: {})。内容の変更が意図したものなら 'ruleman add --checksum {}' で記録し直してください。",
+                        file,
+                        algorithm.as_str(),
+                        expected,
+                        actual,
+                        file
+                    )),
+                    MatchState::Mismatch if matches => Some(format!(
+                        "[ruleman] ファイル '{}' の {} ハッシュが '{}' と一致しています。一致してはいけません。",
+                        file,
+                        algorithm.as_str(),
+                        expected
+                    )),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    has_errors |= report_at(severity, &file, &message);
+                }
+            }
         }
     }
 
@@ -644,20 +757,53 @@ fn cst_string_array(array: &CstArray) -> Vec<String> {
         .collect()
 }
 
-struct AddOutcome {
-    text: String,
-    added: Vec<(PathKind, String)>,
-    skipped: Vec<String>,
+/// One path to register, already made relative to the config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AddEntry {
+    /// A `file`/`directory` rule asserting the path exists.
+    Existence { kind: PathKind, path: String },
+    /// A `checksum` rule pinning the file's current digest.
+    Checksum {
+        path: String,
+        algorithm: ChecksumAlgorithm,
+        digest: String,
+    },
 }
 
-/// Adds `entries` (paths already made relative to the config file) to the
-/// config text as `state: "present"` rules. Paths are appended to an existing
-/// rule of the same type, state and severity when there is one, otherwise a
-/// new rule is appended to `rules`. Editing happens on the JSONC concrete
-/// syntax tree, so comments, formatting and trailing commas survive.
+impl AddEntry {
+    fn path(&self) -> &str {
+        match self {
+            AddEntry::Existence { path, .. } | AddEntry::Checksum { path, .. } => path,
+        }
+    }
+}
+
+/// What happened to an entry. `Updated` only arises for checksum entries whose
+/// rule already existed with a stale digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddResult {
+    Added,
+    Updated,
+    Skipped,
+}
+
+struct AddOutcome {
+    text: String,
+    /// One result per input entry, in the same order.
+    results: Vec<AddResult>,
+}
+
+impl AddOutcome {
+    fn changed(&self) -> bool {
+        self.results.iter().any(|r| *r != AddResult::Skipped)
+    }
+}
+
+/// Registers `entries` in the config text. Editing happens on the JSONC
+/// concrete syntax tree, so comments, formatting and trailing commas survive.
 fn add_entries_to_config_text(
     text: &str,
-    entries: &[(PathKind, String)],
+    entries: &[AddEntry],
     severity: Severity,
 ) -> Result<AddOutcome, String> {
     let root = CstRootNode::parse(text, &jsonc_parser::ParseOptions::default())
@@ -667,81 +813,209 @@ fn add_entries_to_config_text(
         .array_value_or_create("rules")
         .ok_or_else(|| "'rules' が配列ではありません。".to_string())?;
 
-    let mut added = Vec::new();
-    let mut skipped = Vec::new();
-
-    for (kind, path) in entries {
-        let mut duplicate = false;
-        let mut target = None;
-
-        for element in rules.elements() {
-            let Some(rule) = element.as_object() else {
-                continue;
-            };
-            if cst_string_prop(&rule, "type").as_deref() != Some(kind.rule_type()) {
-                continue;
+    let results = entries
+        .iter()
+        .map(|entry| match entry {
+            AddEntry::Existence { kind, path } => {
+                add_existence_entry(&rules, *kind, path, severity)
             }
-            // A rule without `state` defaults to `present`, the state this
-            // command writes; anything else checks something different.
-            if cst_string_prop(&rule, "state").unwrap_or_else(|| "present".to_string()) != "present"
-            {
-                continue;
-            }
-            let Some(paths) = rule.array_value(kind.paths_field()) else {
-                continue;
-            };
-            if cst_string_array(&paths).iter().any(|p| p == path) {
-                duplicate = true;
-                break;
-            }
-            let rule_severity = cst_string_prop(&rule, "severity")
-                .unwrap_or_else(|| Severity::default().as_str().to_string());
-            if target.is_none() && rule_severity == severity.as_str() {
-                target = Some(paths);
-            }
-        }
-
-        if duplicate {
-            skipped.push(path.clone());
-            continue;
-        }
-
-        match target {
-            Some(paths) => {
-                paths.append(CstInputValue::String(path.clone()));
-            }
-            None => {
-                rules.append(CstInputValue::Object(vec![
-                    (
-                        "type".to_string(),
-                        CstInputValue::String(kind.rule_type().to_string()),
-                    ),
-                    (
-                        "severity".to_string(),
-                        CstInputValue::String(severity.as_str().to_string()),
-                    ),
-                    (
-                        "state".to_string(),
-                        CstInputValue::String("present".to_string()),
-                    ),
-                    (
-                        kind.paths_field().to_string(),
-                        CstInputValue::Array(vec![CstInputValue::String(path.clone())]),
-                    ),
-                ]));
-            }
-        }
-        added.push((*kind, path.clone()));
-    }
+            AddEntry::Checksum {
+                path,
+                algorithm,
+                digest,
+            } => add_checksum_entry(&rules, path, *algorithm, digest, severity),
+        })
+        .collect();
 
     Ok(AddOutcome {
         text: root.to_string(),
-        added,
-        skipped,
+        results,
     })
 }
 
-fn run_add(config_arg: Option<&str>, paths: &[String], severity: Severity) -> i32 {
+/// Appends `path` to an existing rule of the same type, state and severity when
+/// there is one, otherwise appends a new rule to `rules`.
+fn add_existence_entry(
+    rules: &CstArray,
+    kind: PathKind,
+    path: &str,
+    severity: Severity,
+) -> AddResult {
+    let mut target = None;
+
+    for element in rules.elements() {
+        let Some(rule) = element.as_object() else {
+            continue;
+        };
+        if cst_string_prop(&rule, "type").as_deref() != Some(kind.rule_type()) {
+            continue;
+        }
+        // A rule without `state` defaults to `present`, the state this command
+        // writes; anything else checks something different.
+        if cst_rule_state(&rule, "present") != "present" {
+            continue;
+        }
+        let Some(paths) = rule.array_value(kind.paths_field()) else {
+            continue;
+        };
+        if cst_string_array(&paths).iter().any(|p| p == path) {
+            return AddResult::Skipped;
+        }
+        if target.is_none() && cst_rule_severity(&rule) == severity.as_str() {
+            target = Some(paths);
+        }
+    }
+
+    match target {
+        Some(paths) => {
+            paths.append(CstInputValue::String(path.to_string()));
+        }
+        None => {
+            rules.append(CstInputValue::Object(vec![
+                (
+                    "type".to_string(),
+                    CstInputValue::String(kind.rule_type().to_string()),
+                ),
+                (
+                    "severity".to_string(),
+                    CstInputValue::String(severity.as_str().to_string()),
+                ),
+                (
+                    "state".to_string(),
+                    CstInputValue::String("present".to_string()),
+                ),
+                (
+                    kind.paths_field().to_string(),
+                    CstInputValue::Array(vec![CstInputValue::String(path.to_string())]),
+                ),
+            ]));
+        }
+    }
+    AddResult::Added
+}
+
+/// Rewrites the digest of the existing `match` rule for this file and algorithm
+/// if there is one — re-running `add --checksum` after an intentional edit is
+/// how a pin gets refreshed — otherwise appends a new rule.
+fn add_checksum_entry(
+    rules: &CstArray,
+    path: &str,
+    algorithm: ChecksumAlgorithm,
+    digest: &str,
+    severity: Severity,
+) -> AddResult {
+    for element in rules.elements() {
+        let Some(rule) = element.as_object() else {
+            continue;
+        };
+        if cst_string_prop(&rule, "type").as_deref() != Some("checksum") {
+            continue;
+        }
+        if cst_string_prop(&rule, "file").as_deref() != Some(path) {
+            continue;
+        }
+        if cst_string_prop(&rule, "algorithm")
+            .unwrap_or_else(|| ChecksumAlgorithm::default().as_str().to_string())
+            != algorithm.as_str()
+        {
+            continue;
+        }
+        // A `mismatch` rule pins a digest the file must *not* have; overwriting
+        // it with the current one would invert what it asserts.
+        if cst_rule_state(&rule, "match") != "match" {
+            continue;
+        }
+
+        let recorded = cst_string_prop(&rule, "expected").unwrap_or_default();
+        if recorded.trim().eq_ignore_ascii_case(digest) {
+            return AddResult::Skipped;
+        }
+        match rule.get("expected") {
+            Some(prop) => prop.set_value(CstInputValue::String(digest.to_string())),
+            None => {
+                rule.append("expected", CstInputValue::String(digest.to_string()));
+            }
+        }
+        return AddResult::Updated;
+    }
+
+    rules.append(CstInputValue::Object(vec![
+        ("type".to_string(), CstInputValue::String("checksum".into())),
+        (
+            "severity".to_string(),
+            CstInputValue::String(severity.as_str().to_string()),
+        ),
+        (
+            "algorithm".to_string(),
+            CstInputValue::String(algorithm.as_str().to_string()),
+        ),
+        ("state".to_string(), CstInputValue::String("match".into())),
+        ("file".to_string(), CstInputValue::String(path.to_string())),
+        (
+            "expected".to_string(),
+            CstInputValue::String(digest.to_string()),
+        ),
+    ]));
+    AddResult::Added
+}
+
+/// A rule's `state`, falling back to the per-rule-type default when unset.
+fn cst_rule_state(rule: &CstObject, default: &'static str) -> String {
+    cst_string_prop(rule, "state").unwrap_or_else(|| default.to_string())
+}
+
+fn cst_rule_severity(rule: &CstObject) -> String {
+    cst_string_prop(rule, "severity").unwrap_or_else(|| Severity::default().as_str().to_string())
+}
+
+/// Turns a cwd-relative CLI argument into the entry to register, resolving the
+/// stored path and — for `--checksum` — hashing the file as it is right now.
+fn build_add_entry(
+    config_path: &Path,
+    input: &str,
+    checksum: Option<ChecksumAlgorithm>,
+) -> Result<AddEntry, String> {
+    let metadata = fs::metadata(input).map_err(|_| {
+        format!(
+            "[ruleman] '{}' が見つかりません。既存のファイルまたはディレクトリを指定してください。",
+            input
+        )
+    })?;
+    let path = path_relative_to_config(config_path, input)?;
+
+    match checksum {
+        Some(algorithm) => {
+            if !metadata.is_file() {
+                return Err(format!(
+                    "[ruleman] '{}' はディレクトリです。--checksum はファイルにのみ指定できます。",
+                    input
+                ));
+            }
+            let digest = file_checksum(Path::new(input), algorithm)
+                .map_err(|e| format!("[ruleman] '{}' のハッシュを計算できません: {}", input, e))?;
+            Ok(AddEntry::Checksum {
+                path,
+                algorithm,
+                digest,
+            })
+        }
+        None => {
+            let kind = if metadata.is_dir() {
+                PathKind::Directory
+            } else {
+                PathKind::File
+            };
+            Ok(AddEntry::Existence { kind, path })
+        }
+    }
+}
+
+fn run_add(
+    config_arg: Option<&str>,
+    paths: &[String],
+    severity: Severity,
+    checksum: Option<ChecksumAlgorithm>,
+) -> i32 {
     let config_path = match resolve_config_path(config_arg) {
         Ok(path) => path,
         Err(message) => {
@@ -764,23 +1038,8 @@ fn run_add(config_arg: Option<&str>, paths: &[String], severity: Severity) -> i3
 
     let mut entries = Vec::new();
     for path in paths {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                eprintln!(
-                    "::error::[ruleman] '{}' が見つかりません。既存のファイルまたはディレクトリを指定してください。",
-                    path
-                );
-                return 1;
-            }
-        };
-        let kind = if metadata.is_dir() {
-            PathKind::Directory
-        } else {
-            PathKind::File
-        };
-        match path_relative_to_config(&config_path, path) {
-            Ok(relative) => entries.push((kind, relative)),
+        match build_add_entry(&config_path, path, checksum) {
+            Ok(entry) => entries.push(entry),
             Err(message) => {
                 eprintln!("::error::{}", message);
                 return 1;
@@ -800,15 +1059,9 @@ fn run_add(config_arg: Option<&str>, paths: &[String], severity: Severity) -> i3
         }
     };
 
-    for path in &outcome.skipped {
-        println!("[ruleman] '{}' は既に登録されています。", path);
-    }
-
-    if outcome.added.is_empty() {
-        return 0;
-    }
-
-    if let Err(e) = fs::write(&config_path, &outcome.text) {
+    if outcome.changed()
+        && let Err(e) = fs::write(&config_path, &outcome.text)
+    {
         eprintln!(
             "::error::[ruleman] 設定ファイル '{}' の書き込みに失敗しました: {}",
             config_path.display(),
@@ -817,22 +1070,73 @@ fn run_add(config_arg: Option<&str>, paths: &[String], severity: Severity) -> i3
         return 1;
     }
 
-    for (kind, path) in &outcome.added {
-        println!(
-            "[ruleman] {} '{}' を '{}' に追加しました。",
-            kind.label(),
-            path,
-            config_path.display()
-        );
+    for (entry, result) in entries.iter().zip(&outcome.results) {
+        println!("[ruleman] {}", add_message(entry, *result, &config_path));
     }
     0
+}
+
+fn add_message(entry: &AddEntry, result: AddResult, config_path: &Path) -> String {
+    let path = entry.path();
+    let config = config_path.display();
+    match (entry, result) {
+        (AddEntry::Existence { kind, .. }, AddResult::Added) => {
+            format!(
+                "{} '{}' を '{}' に追加しました。",
+                kind.label(),
+                path,
+                config
+            )
+        }
+        (AddEntry::Existence { .. }, _) => {
+            format!("'{}' は既に登録されています。", path)
+        }
+        (
+            AddEntry::Checksum {
+                algorithm, digest, ..
+            },
+            AddResult::Added,
+        ) => format!(
+            "'{}' の {} ハッシュを '{}' に記録しました: {}",
+            path,
+            algorithm.as_str(),
+            config,
+            digest
+        ),
+        (
+            AddEntry::Checksum {
+                algorithm, digest, ..
+            },
+            AddResult::Updated,
+        ) => format!(
+            "'{}' の {} ハッシュを更新しました: {}",
+            path,
+            algorithm.as_str(),
+            digest
+        ),
+        (AddEntry::Checksum { algorithm, .. }, AddResult::Skipped) => format!(
+            "'{}' の {} ハッシュは記録済みの値と同じです。",
+            path,
+            algorithm.as_str()
+        ),
+    }
 }
 
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
         Some(Command::Init { force }) => run_init(force),
-        Some(Command::Add { paths, severity }) => run_add(cli.config.as_deref(), &paths, severity),
+        Some(Command::Add {
+            paths,
+            severity,
+            checksum,
+            algorithm,
+        }) => run_add(
+            cli.config.as_deref(),
+            &paths,
+            severity,
+            checksum.then(|| algorithm.unwrap_or_default()),
+        ),
         None => run(cli.config.as_deref()),
     };
     std::process::exit(code);
@@ -993,6 +1297,21 @@ mod tests {
         assert_eq!(join_relative(&base, "README.md"), expected);
     }
 
+    fn existence(kind: PathKind, path: &str) -> AddEntry {
+        AddEntry::Existence {
+            kind,
+            path: path.to_string(),
+        }
+    }
+
+    fn checksum_entry(path: &str, digest: &str) -> AddEntry {
+        AddEntry::Checksum {
+            path: path.to_string(),
+            algorithm: ChecksumAlgorithm::Sha256,
+            digest: digest.to_string(),
+        }
+    }
+
     #[test]
     fn add_appends_to_an_existing_matching_rule_and_keeps_comments() {
         let text = r#"{
@@ -1004,13 +1323,12 @@ mod tests {
 "#;
         let outcome = add_entries_to_config_text(
             text,
-            &[(PathKind::File, "LICENSE".to_string())],
+            &[existence(PathKind::File, "LICENSE")],
             Severity::Error,
         )
         .unwrap();
 
-        assert_eq!(outcome.added, vec![(PathKind::File, "LICENSE".to_string())]);
-        assert!(outcome.skipped.is_empty());
+        assert_eq!(outcome.results, vec![AddResult::Added]);
         assert!(outcome.text.contains("// required files"));
         assert!(outcome.text.contains(r#"["README.md", "LICENSE"]"#));
     }
@@ -1020,7 +1338,7 @@ mod tests {
         let text = r#"{ "rules": [ { "type": "file", "files": ["README.md"] } ] }"#;
         let outcome = add_entries_to_config_text(
             text,
-            &[(PathKind::Directory, "src".to_string())],
+            &[existence(PathKind::Directory, "src")],
             Severity::Error,
         )
         .unwrap();
@@ -1052,7 +1370,7 @@ mod tests {
         }"#;
         let outcome = add_entries_to_config_text(
             text,
-            &[(PathKind::File, "c.txt".to_string())],
+            &[existence(PathKind::File, "c.txt")],
             Severity::Error,
         )
         .unwrap();
@@ -1071,13 +1389,13 @@ mod tests {
             r#"{ "rules": [ { "type": "file", "severity": "warn", "files": ["README.md"] } ] }"#;
         let outcome = add_entries_to_config_text(
             text,
-            &[(PathKind::File, "README.md".to_string())],
+            &[existence(PathKind::File, "README.md")],
             Severity::Error,
         )
         .unwrap();
 
-        assert!(outcome.added.is_empty());
-        assert_eq!(outcome.skipped, vec!["README.md".to_string()]);
+        assert_eq!(outcome.results, vec![AddResult::Skipped]);
+        assert!(!outcome.changed());
         assert_eq!(parse_config_text(&outcome.text).unwrap().rules.len(), 1);
     }
 
@@ -1085,7 +1403,7 @@ mod tests {
     fn add_creates_the_rules_array_when_missing() {
         let outcome = add_entries_to_config_text(
             "{}",
-            &[(PathKind::File, "README.md".to_string())],
+            &[existence(PathKind::File, "README.md")],
             Severity::Warn,
         )
         .unwrap();
@@ -1107,11 +1425,161 @@ mod tests {
         assert!(
             add_entries_to_config_text(
                 r#"{ "rules": {} }"#,
-                &[(PathKind::File, "README.md".to_string())],
+                &[existence(PathKind::File, "README.md")],
                 Severity::Error,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn add_checksum_creates_a_rule_with_the_recorded_digest() {
+        let outcome = add_entries_to_config_text(
+            "{}",
+            &[checksum_entry("vendor/lib.js", "abc123")],
+            Severity::Error,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.results, vec![AddResult::Added]);
+        let config = parse_config_text(&outcome.text).unwrap();
+        match &config.rules[0] {
+            Rule::Checksum {
+                severity,
+                algorithm,
+                state,
+                file,
+                expected,
+            } => {
+                assert_eq!(*severity, Severity::Error);
+                assert_eq!(*algorithm, ChecksumAlgorithm::Sha256);
+                assert_eq!(*state, MatchState::Match);
+                assert_eq!(file, "vendor/lib.js");
+                assert_eq!(expected, "abc123");
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn add_checksum_refreshes_a_stale_digest_in_place() {
+        let text = r#"{
+  "rules": [
+    // pinned by hand
+    { "type": "checksum", "file": "vendor/lib.js", "expected": "old" }
+  ]
+}"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[checksum_entry("vendor/lib.js", "new")],
+            Severity::Error,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.results, vec![AddResult::Updated]);
+        assert!(outcome.text.contains("// pinned by hand"));
+        let config = parse_config_text(&outcome.text).unwrap();
+        assert_eq!(config.rules.len(), 1);
+        match &config.rules[0] {
+            Rule::Checksum { expected, .. } => assert_eq!(expected, "new"),
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn add_checksum_skips_an_unchanged_digest() {
+        let text = r#"{ "rules": [ { "type": "checksum", "file": "a.txt", "expected": "ABC" } ] }"#;
+        let outcome =
+            add_entries_to_config_text(text, &[checksum_entry("a.txt", "abc")], Severity::Error)
+                .unwrap();
+
+        assert_eq!(outcome.results, vec![AddResult::Skipped]);
+        assert!(!outcome.changed());
+    }
+
+    #[test]
+    fn add_checksum_leaves_a_mismatch_rule_alone() {
+        let text = r#"{
+            "rules": [
+                { "type": "checksum", "state": "mismatch", "file": "a.txt", "expected": "banned" }
+            ]
+        }"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[checksum_entry("a.txt", "current")],
+            Severity::Error,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.results, vec![AddResult::Added]);
+        let config = parse_config_text(&outcome.text).unwrap();
+        assert_eq!(config.rules.len(), 2);
+        match &config.rules[0] {
+            Rule::Checksum {
+                state, expected, ..
+            } => {
+                assert_eq!(*state, MatchState::Mismatch);
+                assert_eq!(expected, "banned");
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn checksum_rule_defaults_and_hashing() {
+        let text = r#"{
+            "rules": [ { "type": "checksum", "file": "a.txt", "expected": "x" } ]
+        }"#;
+        let config = parse_config_text(text).unwrap();
+        match &config.rules[0] {
+            Rule::Checksum {
+                algorithm, state, ..
+            } => {
+                assert_eq!(*algorithm, ChecksumAlgorithm::Sha256);
+                assert_eq!(*state, MatchState::Match);
+            }
+            _ => panic!("unexpected rule"),
+        }
+
+        let dir = std::env::temp_dir().join("ruleman_test_checksum");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "abc").unwrap();
+
+        // Known SHA-256 of "abc".
+        assert_eq!(
+            file_checksum(&file, ChecksumAlgorithm::Sha256).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(file_checksum(&dir.join("missing.txt"), ChecksumAlgorithm::Sha256).is_err());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn checksum_rule_passes_and_fails_against_the_real_file() {
+        let dir = std::env::temp_dir().join("ruleman_test_checksum_rule");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "abc").unwrap();
+        let config_path = dir.join("ruleman.json");
+
+        // Uppercase on purpose: digests compare case-insensitively.
+        fs::write(
+            &config_path,
+            r#"{ "rules": [ { "type": "checksum", "file": "a.txt",
+                 "expected": "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" } ] }"#,
+        )
+        .unwrap();
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        assert_eq!(run_config(config), 0);
+
+        fs::write(dir.join("a.txt"), "abcd").unwrap();
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        assert_eq!(run_config(config), 1);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

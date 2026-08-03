@@ -95,6 +95,32 @@
             "key": { "type": "string", "description": "Dot-separated path into the parsed document." },
             "expected": { "description": "The value `key` is compared against." }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "file", "expected"],
+          "properties": {
+            "type": { "const": "checksum" },
+            "severity": { "$ref": "#/definitions/severity" },
+            "algorithm": {
+              "type": "string",
+              "enum": ["sha256"],
+              "default": "sha256",
+              "description": "Hash algorithm used to digest the file."
+            },
+            "state": {
+              "type": "string",
+              "enum": ["match", "mismatch"],
+              "default": "match",
+              "description": "'match' requires the file's digest to equal `expected`; 'mismatch' requires it not to."
+            },
+            "file": { "type": "string", "description": "Path to the file to hash." },
+            "expected": {
+              "type": "string",
+              "description": "Hex digest, compared case-insensitively. Record it with 'ruleman add --checksum <file>'."
+            }
+          }
         }
       ]
     }

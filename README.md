@@ -104,10 +104,26 @@ the parser (currently `"json"`; `yaml`/`toml` planned). `state: "match"`
 }
 ```
 
+**`checksum`** — pins a file's exact bytes by hash, for files that should
+change only deliberately. `algorithm` selects the digest (currently
+`"sha256"`). `state: "match"` (default) fails unless the file's digest
+equals `expected`; `state: "mismatch"` fails when it does. Record and
+refresh the digest with `ruleman add --checksum <file>` instead of pasting
+it by hand.
+
+```jsonc
+{
+  "type": "checksum",
+  "algorithm": "sha256",
+  "file": "vendor/lib.js",
+  "expected": "3879a5d930ae1999b278a3a498f7de3fd83ba8dae59330fcfa2db31c103ac21d"
+}
+```
+
 All file paths (`file`'s `files`, `directory`'s `directories`, `content`'s
-`file`, and `extends`) are resolved relative to the config file that
-declares them — not the directory `ruleman` is run from — so results
-don't change depending on where you invoke it.
+and `checksum`'s `file`, and `extends`) are resolved relative to the config
+file that declares them — not the directory `ruleman` is run from — so
+results don't change depending on where you invoke it.
 
 Config files may use comments and trailing commas (JSONC).
 
@@ -116,7 +132,8 @@ Config files may use comments and trailing commas (JSONC).
 ```text
 ruleman [--config <path>]     # run checks (default command)
 ruleman init [--force]        # scaffold a starter ruleman.json
-ruleman add <path>...         # add existing paths as existence rules
+ruleman add <path>...         # add existing paths as rules
+ruleman add --checksum <file>...   # ...pinning their current hash instead
 ```
 
 `add` registers paths that already exist in the repo. With no options it writes
@@ -125,6 +142,10 @@ an existence check (`state: "present"`, `severity: "error"`); pass
 files go into a `file` rule, directories into a `directory` rule. Paths are
 stored relative to the config file, merged into a matching existing rule when
 there is one, and the config's comments and formatting are preserved.
+
+`--checksum` writes a `checksum` rule with the file's current digest instead.
+Re-running it after an intentional edit rewrites the recorded digest in place,
+which is how a pin gets refreshed; on an unchanged file it writes nothing.
 
 ## Building from source
 
