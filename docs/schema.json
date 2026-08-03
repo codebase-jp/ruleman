@@ -81,9 +81,9 @@
             "severity": { "$ref": "#/definitions/severity" },
             "format": {
               "type": "string",
-              "enum": ["json"],
+              "enum": ["json", "yaml", "toml"],
               "default": "json",
-              "description": "Parser to use for the file. yaml/toml are planned."
+              "description": "Parser to use for the file. YAML and TOML values are mapped onto the JSON shape the dotted key walks."
             },
             "state": {
               "type": "string",
@@ -97,8 +97,8 @@
               "default": "equals",
               "description": "How the value at `key` is compared with `expected`: deep equality, substring/element containment, or a regular expression `expected` must match."
             },
-            "file": { "type": "string", "description": "Path to the file." },
-            "key": { "type": "string", "description": "Dot-separated path into the parsed document." },
+            "file": { "type": "string", "description": "Path to the file, or a glob pattern; every matching file is checked." },
+            "key": { "type": "string", "description": "Dot-separated path into the parsed document; numeric segments index arrays." },
             "expected": { "description": "The value `key` is compared against." }
           }
         },
@@ -121,7 +121,7 @@
               "default": "match",
               "description": "'match' requires the file's digest to equal `expected`; 'mismatch' requires it not to."
             },
-            "file": { "type": "string", "description": "Path to the file to hash." },
+            "file": { "type": "string", "description": "Path to the file to hash, or a glob pattern; every matching file must have this digest." },
             "expected": {
               "type": "string",
               "pattern": "^\\s*[0-9a-fA-F]{64}\\s*$",

@@ -23,11 +23,17 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
     user-facing strings are English (see below).
   - `paths.rs` — expands glob patterns into the paths a rule checks.
   - `checksum.rs` — hashing files and the algorithms `checksum` can name.
+  - `document.rs` — parsing JSON/YAML/TOML into the one JSON-shaped tree the
+    engine walks. The conversions are deliberate and documented, not delegated
+    to a serde bridge: a value's type decides whether `expected` matches it.
   - `config_edit.rs` — rewriting a config file's *text* via the JSONC CST so
     comments and formatting survive. Pure: no filesystem access.
   - `add.rs` / `init.rs` — one module per subcommand, each exposing `run`.
   - `testdata.rs` — `#[cfg(test)]` fixtures shared across modules.
   Tests live in a `#[cfg(test)] mod tests` inside the module they cover.
+- `tests/cli.rs` — integration tests that spawn the built binary. Anything
+  observable from outside (exit codes, stdout vs stderr, each `--format`, files
+  a subcommand writes) belongs here rather than being verified by hand.
 - `npm/ruleman/` — the main npm package (`ruleman`); `bin/ruleman.js` resolves
   and spawns the right platform binary.
 - `npm/platforms/<os-arch>/` — one npm package per target platform; binaries
@@ -63,8 +69,10 @@ check, not genuinely different checks:
   started/stopped), and this project follows the same convention.
 - Don't add a mirror rule type per file format either (no `json-match`,
   `yaml-match`, `toml-match`). One `content` rule type takes a `format`
-  attribute (`"json"` today; `yaml`/`toml` planned) that selects the parser;
-  the dotted-key comparison logic stays shared regardless of format.
+  attribute (`json`/`yaml`/`toml`) that selects the parser; every format is
+  converted to a JSON-shaped tree in `document.rs`, so the dotted-key and
+  comparison logic is written once. A new format means a conversion there, not
+  a new rule type or a second comparison path.
 - Do add a separate rule type when the check is genuinely different, not
   just inverted or reparameterized — `file` and `directory` are separate
   rule types (not one `file` type with a `kind: "file" | "directory"`
@@ -79,6 +87,8 @@ check, not genuinely different checks:
   them into one enum (no `state: "json-match" | "regex-mismatch" | ...`).
 - A glob pattern in `files`/`directories` asserts "there is at least one
   match" — `absent` fails per match, `present` fails only when nothing matches.
+  In `content`/`checksum`, where existence isn't the assertion, a pattern reads
+  as "every matching file satisfies this" and matching nothing is a failure.
   Asserting "for all" over a *set of directories* ("every package has a
   README") is a different quantifier that no attribute expresses today: a
   `for_each` attribute was built and then removed, because it made `files` mean

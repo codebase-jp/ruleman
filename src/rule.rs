@@ -40,12 +40,16 @@ pub(crate) enum FileState {
 pub(crate) enum ContentFormat {
     #[default]
     Json,
+    Yaml,
+    Toml,
 }
 
 impl ContentFormat {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             ContentFormat::Json => "json",
+            ContentFormat::Yaml => "yaml",
+            ContentFormat::Toml => "toml",
         }
     }
 }
@@ -134,14 +138,13 @@ pub(crate) enum Rule {
 }
 
 impl Rule {
-    /// Every path-shaped attribute of this rule, for validation. `content` and
-    /// `checksum` name a single file and never take a pattern: they read one
-    /// document, so fanning out across matches would change what they assert.
+    /// Every path-shaped attribute of this rule, so a malformed glob is caught
+    /// at load time whichever rule type it appears in.
     fn patterns(&self) -> &[String] {
         match self {
             Rule::File { files, .. } => files,
             Rule::Directory { directories, .. } => directories,
-            Rule::Content { .. } | Rule::Checksum { .. } => &[],
+            Rule::Content { file, .. } | Rule::Checksum { file, .. } => std::slice::from_ref(file),
         }
     }
 }

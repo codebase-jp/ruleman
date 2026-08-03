@@ -1,8 +1,9 @@
 //! The check engine: runs each rule against the working tree and collects
 //! failures as diagnostics. How those reach the user is `output`'s job.
 
-use crate::checksum::file_checksum;
+use crate::checksum::{ChecksumAlgorithm, file_checksum};
 use crate::config::{Config, load_config, resolve_config_path};
+use crate::document;
 use crate::output::{Diagnostic, OutputFormat, render};
 use crate::paths::{Target, resolve};
 use crate::rule::{Comparison, ContentFormat, FileState, MatchState, Rule, Severity};
@@ -150,6 +151,38 @@ fn check_one_directory(
     }
 }
 
+/// Applies a document check to whatever `entry` names.
+///
+/// A literal path is checked as written. A pattern is checked once per match —
+/// "every matching file satisfies this" — and matching nothing is a failure,
+/// because a rule about a file's contents has nothing to assert without one.
+fn check_documents(
+    kind: &str,
+    entry: &str,
+    check: impl Fn(&str) -> Option<String>,
+) -> Vec<(Option<String>, String)> {
+    let target = match resolve(entry) {
+        Ok(target) => target,
+        Err(message) => return vec![(None, message)],
+    };
+    match target {
+        Target::Literal(path) => check(&path)
+            .map(|message| vec![(Some(path), message)])
+            .unwrap_or_default(),
+        Target::Matched { pattern, paths } if paths.is_empty() => vec![(
+            None,
+            format!(
+                "no file matches the pattern '{}', so there is nothing for this {} rule to check",
+                pattern, kind
+            ),
+        )],
+        Target::Matched { paths, .. } => paths
+            .into_iter()
+            .filter_map(|path| check(&path).map(|message| (Some(path), message)))
+            .collect(),
+    }
+}
+
 pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -216,10 +249,10 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 if severity == Severity::Off {
                     continue;
                 }
-                if let Some(message) =
-                    check_content(format, state, comparison, &file, &key, &expected)
-                {
-                    diagnostics.push(Diagnostic::new(severity, "content", Some(file), message));
+                for (path, message) in check_documents("content", &file, |path| {
+                    check_content(format, state, comparison, path, &key, &expected)
+                }) {
+                    diagnostics.push(Diagnostic::new(severity, "content", path, message));
                 }
             }
             Rule::Checksum {
@@ -233,49 +266,51 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                     continue;
                 }
 
-                let actual = match file_checksum(Path::new(&file), algorithm) {
-                    Ok(actual) => actual,
-                    Err(e) => {
-                        let message = format!("cannot hash '{}': {}", file, e);
-                        diagnostics.push(Diagnostic::new(
-                            severity,
-                            "checksum",
-                            Some(file),
-                            message,
-                        ));
-                        continue;
-                    }
-                };
-
-                let expected = expected.trim();
-                let matches = actual.eq_ignore_ascii_case(expected);
-                let message = match state {
-                    MatchState::Match if !matches => Some(format!(
-                        "{} checksum of '{}' does not match the recorded digest \
-                         (expected {}, actual {}). If the change was intentional, \
-                         re-record it with 'ruleman add --checksum {}'",
-                        algorithm.as_str(),
-                        file,
-                        expected,
-                        actual,
-                        file
-                    )),
-                    MatchState::Mismatch if matches => Some(format!(
-                        "{} checksum of '{}' matches '{}', which it must not",
-                        algorithm.as_str(),
-                        file,
-                        expected
-                    )),
-                    _ => None,
-                };
-                if let Some(message) = message {
-                    diagnostics.push(Diagnostic::new(severity, "checksum", Some(file), message));
+                for (path, message) in check_documents("checksum", &file, |path| {
+                    check_checksum(algorithm, state, path, &expected)
+                }) {
+                    diagnostics.push(Diagnostic::new(severity, "checksum", path, message));
                 }
             }
         }
     }
 
     diagnostics
+}
+
+/// Returns the failure message for a `checksum` rule, or `None` when it passes.
+fn check_checksum(
+    algorithm: ChecksumAlgorithm,
+    state: MatchState,
+    file: &str,
+    expected: &str,
+) -> Option<String> {
+    let actual = match file_checksum(Path::new(file), algorithm) {
+        Ok(actual) => actual,
+        Err(e) => return Some(format!("cannot hash '{}': {}", file, e)),
+    };
+
+    let expected = expected.trim();
+    let matches = actual.eq_ignore_ascii_case(expected);
+    match state {
+        MatchState::Match if !matches => Some(format!(
+            "{} checksum of '{}' does not match the recorded digest \
+             (expected {}, actual {}). If the change was intentional, \
+             re-record it with 'ruleman add --checksum {}'",
+            algorithm.as_str(),
+            file,
+            expected,
+            actual,
+            file
+        )),
+        MatchState::Mismatch if matches => Some(format!(
+            "{} checksum of '{}' matches '{}', which it must not",
+            algorithm.as_str(),
+            file,
+            expected
+        )),
+        _ => None,
+    }
 }
 
 /// Returns the failure message for a `content` rule, or `None` when it passes.
@@ -300,11 +335,8 @@ fn check_content(
         Err(e) => return Some(format!("cannot read '{}': {}", file, e)),
     };
 
-    let parsed = match format {
-        ContentFormat::Json => serde_json::from_str::<Value>(&raw),
-    };
-    let document = match parsed {
-        Ok(value) => value,
+    let document = match document::parse(format, &raw) {
+        Ok(document) => document,
         Err(e) => {
             return Some(format!(
                 "cannot parse '{}' as {}: {}",

@@ -10,6 +10,28 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
 
 ## [Unreleased]
 
+### Added
+
+- **YAML and TOML** for `content`'s `format`, alongside `json`. All three are
+  mapped onto the same JSON-shaped tree, so `key`, `comparison` and `state`
+  behave identically whichever format a file is written in — which finally
+  makes the most common targets checkable: a GitHub workflow's `jobs.*.steps`,
+  a `Cargo.toml`'s `package.edition`, a `docker-compose.yml`'s image tags. The
+  mapping is part of the documented contract: types are preserved (YAML `3` is
+  a number, not `"3"`), anchors and aliases are resolved, TOML date-times and
+  YAML `.inf`/`.nan` become the strings they were written as, and a file
+  holding several YAML documents is rejected rather than silently checked as
+  its first one.
+- **Glob patterns in `content`'s and `checksum`'s `file`.** A pattern there
+  reads as "every matching file satisfies this", so one rule covers a whole set
+  of packages (`packages/*/package.json`). Matching nothing is a failure — a
+  rule about a file's contents has nothing to assert without a file. Before
+  this, a pattern was taken as a literal path and reported the misleading
+  "file 'packages/*/package.json' is missing".
+- Integration tests that run the built binary (`tests/cli.rs`), covering exit
+  codes, the three output formats, config discovery and `--config`, and what
+  `init` and `add` write to disk. That surface was only ever checked by hand.
+
 ## [0.3.0] - 2026-08-03
 
 ### Added

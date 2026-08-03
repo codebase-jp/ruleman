@@ -95,7 +95,9 @@ omit it to skip the check.
 ```
 
 **`content`** — checks a value inside a structured file. `format` selects
-the parser (currently `"json"`; `yaml`/`toml` planned). `comparison` selects
+the parser: `"json"` (default), `"yaml"` or `"toml"`, all mapped onto the
+same JSON-shaped tree so the rest of the rule reads the same either way.
+`comparison` selects
 how the value at `key` is compared — `"equals"` (default), `"contains"`
 (substring of a string, element of an array) or `"regex"` — and `state`
 selects whether that comparison must hold (`"match"`, default) or fail
@@ -107,12 +109,24 @@ selects whether that comparison must hold (`"match"`, default) or fail
   "key": "name", "expected": "^@acme/" }
 { "type": "content", "comparison": "contains", "file": "package.json",
   "key": "workspaces", "expected": "packages/*" }
+
+// a glob checks every match: each package's license
+{ "type": "content", "file": "packages/*/package.json",
+  "key": "license", "expected": "MIT" }
+
+// YAML and TOML read the same way
+{ "type": "content", "format": "yaml", "comparison": "regex",
+  "file": ".github/workflows/*.yml",
+  "key": "jobs.test.steps.0.uses", "expected": "^actions/checkout@v[5-9]" }
+{ "type": "content", "format": "toml", "file": "Cargo.toml",
+  "key": "package.edition", "expected": "2024" }
 ```
 
 **`checksum`** — pins a file's exact bytes by hash, for files that should
 change only deliberately. `algorithm` selects the digest (currently
 `"sha256"`). `state: "match"` (default) fails unless the file's digest
-equals `expected`; `state: "mismatch"` fails when it does. Record and
+equals `expected`; `state: "mismatch"` fails when it does. `file` may be a
+glob, in which case every match must have that digest. Record and
 refresh the digest with `ruleman add --checksum <file>` instead of pasting
 it by hand.
 

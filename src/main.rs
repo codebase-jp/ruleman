@@ -3,6 +3,7 @@ mod check;
 mod checksum;
 mod config;
 mod config_edit;
+mod document;
 mod init;
 mod output;
 mod paths;

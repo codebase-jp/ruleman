@@ -112,11 +112,15 @@ shouldn't leak into `file`'s schema.
 
 ### `content`
 
-Checks a value inside a structured file. Rather than a `json-match` rule
-type today and a `yaml-match`/`toml-match` type each time a new format is
-supported, `format` selects the parser and the rule type itself stays
-`content`. Named to pair with `file`: `file` checks whether a file exists,
-`content` checks what's inside it.
+Checks a value inside a structured file. Rather than a `json-match` rule type
+and a `yaml-match`/`toml-match` type per format, `format` selects the parser
+and the rule type itself stays `content`. Named to pair with `file`: `file`
+checks whether a file exists, `content` checks what's inside it.
+
+`format` reads `json` (default), `yaml` or `toml`. All three are mapped onto
+the same JSON-shaped tree, so `key`, `comparison` and `state` behave
+identically whichever one a file is written in — see
+[format mapping](#format-mapping) for the details that follow from that.
 
 `comparison` decides *how* the value at `key` is compared with `expected`, and
 `state` decides *whether that comparison has to hold* — two independent axes, so
@@ -149,12 +153,41 @@ comparison.
 
 | Field        | Type                                      | Required | Description                                                                                       |
 | ------------ | ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------- |
-| `format`     | `"json"`                                  | no       | Parser to use. `"json"` (default); `yaml`/`toml` planned.                                          |
-| `file`       | `string`                                  | yes      | Path to the file.                                                                                 |
+| `format`     | `"json"` \| `"yaml"` \| `"toml"`           | no       | Parser to use. `"json"` is the default.                                                            |
+| `file`       | `string`                                  | yes      | Path to the file, or a [glob pattern](#globs) — every matching file is checked.                     |
 | `key`        | `string`                                  | yes      | Dot-separated path into the parsed document; numeric segments index arrays.                        |
 | `expected`   | any                                       | yes      | The value `key` is compared against. Must be a string when `comparison` is `"regex"`.             |
 | `comparison` | `"equals"` \| `"contains"` \| `"regex"`   | no       | `"equals"` (default) deep equality; `"contains"` substring of a string or element of an array; `"regex"` the value must match. |
 | `state`      | `"match"` \| `"mismatch"`                 | no       | `"match"` (default) requires the comparison to hold; `"mismatch"` requires it to fail.            |
+
+#### Format mapping
+
+YAML and TOML are converted to the JSON shape before the key is walked, which
+makes the following part of the contract rather than an accident:
+
+```jsonc
+// a workflow pinned to a modern action
+{ "type": "content", "format": "yaml", "comparison": "regex",
+  "file": ".github/workflows/*.yml",
+  "key": "jobs.test.steps.0.uses", "expected": "^actions/checkout@v[5-9]" }
+
+// the crate's edition
+{ "type": "content", "format": "toml", "file": "Cargo.toml",
+  "key": "package.edition", "expected": "2024" }
+```
+
+- **Types are preserved, and they matter.** YAML `retries: 3` is a number, so
+  `"expected": 3` matches and `"expected": "3"` does not.
+- **YAML anchors and aliases are resolved**, so a rule sees the merged value.
+- **A file with several YAML documents is rejected** rather than silently
+  checked as its first one. A rule reads one document.
+- **Non-string YAML mapping keys become their written form**, so `1: x` is
+  addressed as `"1"`. A sequence or mapping used as a key is rejected — a
+  dotted key cannot name it.
+- **TOML date-times become the string they were written as**
+  (`1979-05-27T07:32:00Z`), since JSON has no date type.
+- **`.inf` / `.nan`** stay strings for the same reason, and can be compared as
+  such.
 
 ### `checksum`
 
@@ -255,6 +288,18 @@ when nothing matches, and `state: "absent"` fails once per match. That makes
 { "type": "file", "state": "absent", "files": ["**/*.log", "**/.DS_Store"] }
 { "type": "directory", "state": "absent", "directories": ["packages/*/node_modules"] }
 ```
+
+For `content` and `checksum`, a pattern reads as **"every matching file
+satisfies this"**, which is how a rule covers a whole set of packages:
+
+```jsonc
+{ "type": "content", "file": "packages/*/package.json",
+  "key": "license", "expected": "MIT" }
+```
+
+Matching nothing is a failure there — a rule about a file's contents has
+nothing to assert without a file. For `file` and `directory`, where existence
+*is* the assertion, the reading differs by `state`.
 
 Note the quantifier when reading a `present` pattern:
 `files: ["packages/*/README.md"]` passes as soon as *any* package has a README —
