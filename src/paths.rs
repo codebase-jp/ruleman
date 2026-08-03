@@ -23,27 +23,8 @@ pub(crate) enum Target {
     Matched { pattern: String, paths: Vec<String> },
 }
 
-/// Resolves one `files` / `directories` entry into the targets to check.
-///
-/// With `for_each` set, the entry is resolved inside every directory that
-/// `for_each` matches, yielding one target per directory — "for all", so no
-/// matching directory means nothing to check. Without it, exactly one target
-/// comes back.
-pub(crate) fn resolve(entry: &str, for_each: Option<&str>) -> Result<Vec<Target>, String> {
-    let Some(for_each) = for_each else {
-        return Ok(vec![target(entry)?]);
-    };
-
-    let mut targets = Vec::new();
-    for dir in expand(for_each)? {
-        if Path::new(&dir).is_dir() {
-            targets.push(target(&format!("{}/{}", dir, entry))?);
-        }
-    }
-    Ok(targets)
-}
-
-fn target(entry: &str) -> Result<Target, String> {
+/// Resolves one `files` / `directories` entry into the target to check.
+pub(crate) fn resolve(entry: &str) -> Result<Target, String> {
     if is_pattern(entry) {
         Ok(Target::Matched {
             pattern: entry.to_string(),
@@ -209,41 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn for_each_resolves_the_entry_inside_every_matching_directory() {
-        let dir = sandbox("ruleman_test_for_each");
-        fs::create_dir_all(dir.join("packages/a")).unwrap();
-        fs::create_dir_all(dir.join("packages/b")).unwrap();
-        fs::write(dir.join("packages/a/README.md"), "").unwrap();
-        let base = dir.to_string_lossy().into_owned();
-
-        let targets = resolve("README.md", Some(&format!("{}/packages/*", base))).unwrap();
-        assert_eq!(targets.len(), 2, "{:?}", targets);
-        // Both packages are checked, including the one missing the file.
-        let literals: Vec<_> = targets
-            .iter()
-            .map(|t| match t {
-                Target::Literal(path) => path.clone(),
-                other => panic!("unexpected target {:?}", other),
-            })
-            .collect();
-        assert!(literals.iter().any(|p| p.ends_with("packages/a/README.md")));
-        assert!(literals.iter().any(|p| p.ends_with("packages/b/README.md")));
-
-        // "For all" over nothing is vacuously true: no directories, no targets.
-        assert!(
-            resolve("README.md", Some(&format!("{}/apps/*", base)))
-                .unwrap()
-                .is_empty()
-        );
-
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn a_literal_entry_resolves_to_itself_without_touching_the_disk() {
         assert_eq!(
-            resolve("does/not/exist.md", None).unwrap(),
-            vec![Target::Literal("does/not/exist.md".to_string())]
+            resolve("does/not/exist.md").unwrap(),
+            Target::Literal("does/not/exist.md".to_string())
         );
     }
 }

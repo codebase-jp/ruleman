@@ -77,10 +77,16 @@ check, not genuinely different checks:
 - Keep axes that can vary independently (e.g. `content`'s `format` vs.
   `comparison` vs. `state`) as separate attributes rather than cross-producing
   them into one enum (no `state: "json-match" | "regex-mismatch" | ...`).
-- Keep the two quantifiers distinct. A glob pattern in `files`/`directories`
-  asserts "there is at least one match"; `for_each` asserts "for all" and is
-  evaluated per matching directory. Don't collapse them into one attribute —
-  which one a rule means is exactly the thing an author has to say.
+- A glob pattern in `files`/`directories` asserts "there is at least one
+  match" — `absent` fails per match, `present` fails only when nothing matches.
+  Asserting "for all" over a *set of directories* ("every package has a
+  README") is a different quantifier that no attribute expresses today: a
+  `for_each` attribute was built and then removed, because it made `files` mean
+  two different things depending on its presence, its no-match case passed
+  silently, and enumerating a handful of packages explicitly is clearer. Don't
+  re-add it speculatively — wait for a case enumeration can't cover, most
+  likely a shared config distributed via `extends` that has to assert something
+  about the consuming repo's structure.
 - Comparison-style rules decompose into independent axes: *what* is compared
   (the rule type — a key inside a parsed document vs. the whole file's
   digest), *how the reference is supplied* (`checksum`'s `algorithm`,

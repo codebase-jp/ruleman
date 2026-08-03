@@ -20,15 +20,12 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
   `.git` and anything matched by `.gitignore` are skipped — a rule shouldn't
   fire on a build artifact the repo already ignores. Malformed patterns fail at
   config load time with their rule index.
-- **`for_each`** on `file` and `directory`, a glob matching directories: each
-  entry is then checked inside every matching directory. Patterns and `for_each`
-  are the two quantifiers, kept as separate attributes because which one a rule
-  means is the thing its author has to say — `files: ["packages/*/README.md"]`
-  asserts "at least one package has a README", while
-  `for_each: "packages/*"` with `files: ["README.md"]` asserts "every package
-  does" and reports each one that doesn't. A pattern matching nothing fails
-  `present` and satisfies `absent`; a `for_each` matching no directory is
-  vacuously true.
+
+  A pattern asserts "there is at least one match": `state: "absent"` fails once
+  per match, which is how a whole class of paths gets forbidden
+  (`files: ["**/*.log"]`), and `state: "present"` fails when nothing matches.
+  Note that a `present` pattern is satisfied by *any* match —
+  `files: ["packages/*/README.md"]` does not require one per package.
 - **`comparison`** on `content`: `equals` (default, unchanged), `contains`
   (substring of a string, element of an array) or `regex`. It's a separate axis
   from `state`, so any comparison composes with `mismatch` — a regex the value

@@ -73,18 +73,17 @@ Every rule accepts a `severity`: `"error"` (default, fails the run),
 **`file`** — checks whether listed paths exist **as regular files**,
 Ansible-`file`-module style: `state: "present"` (default) fails if any is
 missing or is actually a directory; `state: "absent"` fails if any exists
-(as anything). Entries containing `*`, `?`, `[` or `{` are glob patterns;
-`for_each` checks each entry inside every directory a pattern matches.
+(as anything). Entries containing `*`, `?`, `[` or `{` are glob patterns.
 
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
 { "type": "file", "state": "absent", "files": ["yarn.lock", "**/*.log"] }
-{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
 ```
 
-A pattern asserts "there is at least one match"; `for_each` asserts "for
-all", failing once per directory. `*` stops at a path separator and `**`
-crosses one; `.git` and gitignored paths are skipped.
+A pattern asserts "there is at least one match", so `absent` is the natural
+way to forbid a class of paths, while a `present` pattern passes as soon as
+anything matches. `*` stops at a path separator and `**` crosses one; `.git`
+and gitignored paths are skipped.
 
 **`directory`** — same idea, for directories. `empty` optionally requires
 the directory to have zero (`true`) or at least one (`false`) entries;
@@ -126,8 +125,8 @@ it by hand.
 }
 ```
 
-All file paths (`file`'s `files`, `directory`'s `directories`, `for_each`,
-`content`'s and `checksum`'s `file`, and path-shaped `extends` entries) are
+All file paths (`file`'s `files`, `directory`'s `directories`, `content`'s
+and `checksum`'s `file`, and path-shaped `extends` entries) are
 resolved relative to the config file that declares them — not the directory
 `ruleman` is run from — so results don't change depending on where you
 invoke it.

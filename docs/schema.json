@@ -45,10 +45,6 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "Files to check, relative to the config file. An entry containing *, ?, [ or { is a glob pattern matched against the working tree."
-            },
-            "for_each": {
-              "type": "string",
-              "description": "A glob matching directories. When set, every entry in `files` is checked inside each matching directory ('for all') instead of once at the top."
             }
           }
         },
@@ -73,10 +69,6 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "Directories to check, relative to the config file. An entry containing *, ?, [ or { is a glob pattern matched against the working tree."
-            },
-            "for_each": {
-              "type": "string",
-              "description": "A glob matching directories. When set, every entry in `directories` is checked inside each matching directory."
             }
           }
         },

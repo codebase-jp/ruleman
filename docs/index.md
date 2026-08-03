@@ -83,14 +83,12 @@ file** — a directory with the same name does not satisfy it.
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
 { "type": "file", "state": "absent", "files": ["yarn.lock", "**/*.log"] }
-{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
 ```
 
-| Field      | Type                      | Required | Description                                                                                              |
-| ---------- | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `files`    | `string[]`                | yes      | Paths to check (repo-relative). An entry containing `*`, `?`, `[` or `{` is a [glob pattern](#globs).    |
-| `state`    | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a regular file; `"absent"` fails if anything exists there. |
-| `for_each` | `string`                  | no       | A glob matching directories; each `files` entry is checked inside every match. See [globs](#globs).      |
+| Field   | Type                      | Required | Description                                                                                              |
+| ------- | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `files` | `string[]`                | yes      | Paths to check (repo-relative). An entry containing `*`, `?`, `[` or `{` is a [glob pattern](#globs).     |
+| `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a regular file; `"absent"` fails if anything exists there.  |
 
 ### `directory`
 
@@ -103,7 +101,7 @@ shouldn't leak into `file`'s schema.
 ```jsonc
 { "type": "directory", "state": "present", "directories": [".github/workflows"] }
 { "type": "directory", "directories": ["dist"], "empty": false }
-{ "type": "directory", "state": "absent", "for_each": "packages/*", "directories": ["node_modules"] }
+{ "type": "directory", "state": "absent", "directories": ["packages/*/node_modules"] }
 ```
 
 | Field         | Type                      | Required | Description                                                                                                            |
@@ -111,7 +109,6 @@ shouldn't leak into `file`'s schema.
 | `directories` | `string[]`                | yes      | Paths to check (repo-relative). An entry with `*`, `?`, `[` or `{` is a [glob pattern](#globs).                        |
 | `state`       | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a directory; `"absent"` fails if anything exists there.                  |
 | `empty`       | `boolean`                 | no       | If set, additionally requires zero (`true`) or at least one (`false`) entries. Only checked when `state` is `present`. |
-| `for_each`    | `string`                  | no       | A glob matching directories; each `directories` entry is checked inside every match. See [globs](#globs).              |
 
 ### `content`
 
@@ -228,14 +225,13 @@ down the package's own `extends` chain.
 
 ### Path resolution
 
-`file`'s `files`, `directory`'s `directories`, `for_each`, `content`'s and
-`checksum`'s `file`, and path-shaped `extends` entries are all resolved
+`file`'s `files`, `directory`'s `directories`, `content`'s and `checksum`'s
+`file`, and path-shaped `extends` entries are all resolved
 relative to the config file that declares them — not the directory `ruleman` is
 invoked from. This keeps results consistent whether you run `ruleman` from the
 repo root, from a subdirectory (via upward config discovery), or via `extends`
-pulling in rules defined elsewhere. The exception is entries under `for_each`,
-which are relative to each directory it matches, and rules from an extended
-package, which resolve against the consuming repo.
+pulling in rules defined elsewhere. The one exception is rules from an extended
+package, which resolve against the consuming repo — see [`extends`](#extends).
 
 ### Globs
 
@@ -251,21 +247,22 @@ which is checked with a single `stat` and never triggers a directory walk.
 - A malformed pattern is a config error, reported with its rule index before
   any check runs.
 
-Patterns and `for_each` express the two different quantifiers, which is why
-they are separate attributes rather than one overloaded pattern:
+A pattern asserts **"there is at least one match"**: `state: "present"` fails
+when nothing matches, and `state: "absent"` fails once per match. That makes
+`absent` the natural way to forbid a whole class of paths:
 
 ```jsonc
-// "there is at least one": passes as soon as any package has a README
-{ "type": "file", "files": ["packages/*/README.md"] }
-
-// "for all": fails once per package that is missing one
-{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
+{ "type": "file", "state": "absent", "files": ["**/*.log", "**/.DS_Store"] }
+{ "type": "directory", "state": "absent", "directories": ["packages/*/node_modules"] }
 ```
 
-A pattern that matches nothing fails `state: "present"` (there is no match to
-satisfy it) and satisfies `state: "absent"` (there is nothing to forbid). A
-`for_each` that matches no directory is vacuously true — nothing to check — so
-pair it with a `directory` rule if the directory itself is required.
+Note the quantifier when reading a `present` pattern:
+`files: ["packages/*/README.md"]` passes as soon as *any* package has a README —
+it does not require one in every package. To require it in each, list them:
+
+```jsonc
+{ "type": "file", "files": ["packages/a/README.md", "packages/b/README.md"] }
+```
 
 ### Comments and trailing commas
 

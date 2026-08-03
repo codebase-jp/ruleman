@@ -159,27 +159,22 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 severity,
                 state,
                 files,
-                for_each,
             } => {
                 if severity == Severity::Off {
                     continue;
                 }
                 for entry in files {
-                    let targets = match resolve(&entry, for_each.as_deref()) {
-                        Ok(targets) => targets,
+                    let target = match resolve(&entry) {
+                        Ok(target) => target,
                         Err(message) => {
                             diagnostics.push(Diagnostic::new(severity, "file", None, message));
                             continue;
                         }
                     };
-                    for target in targets {
-                        for (path, message) in
-                            check_paths(target, state, "file", |path, display| {
-                                check_one_file(path, display, state)
-                            })
-                        {
-                            diagnostics.push(Diagnostic::new(severity, "file", path, message));
-                        }
+                    for (path, message) in check_paths(target, state, "file", |path, display| {
+                        check_one_file(path, display, state)
+                    }) {
+                        diagnostics.push(Diagnostic::new(severity, "file", path, message));
                     }
                 }
             }
@@ -188,27 +183,24 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 state,
                 directories,
                 empty,
-                for_each,
             } => {
                 if severity == Severity::Off {
                     continue;
                 }
                 for entry in directories {
-                    let targets = match resolve(&entry, for_each.as_deref()) {
-                        Ok(targets) => targets,
+                    let target = match resolve(&entry) {
+                        Ok(target) => target,
                         Err(message) => {
                             diagnostics.push(Diagnostic::new(severity, "directory", None, message));
                             continue;
                         }
                     };
-                    for target in targets {
-                        for (path, message) in
-                            check_paths(target, state, "directory", |path, display| {
-                                check_one_directory(path, display, state, empty)
-                            })
-                        {
-                            diagnostics.push(Diagnostic::new(severity, "directory", path, message));
-                        }
+                    for (path, message) in
+                        check_paths(target, state, "directory", |path, display| {
+                            check_one_directory(path, display, state, empty)
+                        })
+                    {
+                        diagnostics.push(Diagnostic::new(severity, "directory", path, message));
                     }
                 }
             }
@@ -550,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn patterns_quantify_differently_from_for_each() {
+    fn a_pattern_asserts_at_least_one_match() {
         let dir = std::env::temp_dir().join("ruleman_test_patterns");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("packages/a")).unwrap();
@@ -564,14 +556,9 @@ mod tests {
             check_config(load_config(&config_path, &mut HashSet::new()).unwrap())
         };
 
-        // A pattern asserts "at least one": one README is enough.
+        // One matching README satisfies the pattern; it does not assert that
+        // every package has one.
         assert!(run(r#"{ "type": "file", "files": ["packages/*/README.md"] }"#).is_empty());
-
-        // `for_each` asserts "for all": the package without one fails.
-        let diagnostics =
-            run(r#"{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }"#);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("packages/b/README.md"));
 
         // A pattern matching nothing fails `present`...
         let diagnostics = run(r#"{ "type": "file", "files": ["docs/*.md"] }"#);
@@ -586,16 +573,10 @@ mod tests {
         // ...and satisfies `absent`.
         assert!(run(r#"{ "type": "file", "state": "absent", "files": ["docs/*.md"] }"#).is_empty());
 
-        // `absent` reports every match, not just the first.
+        // `absent` reports every match, which is how "no *.log anywhere" is said.
         let diagnostics = run(r#"{ "type": "file", "state": "absent", "files": ["**/*.log"] }"#);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("stray.log"));
-
-        // `for_each` over nothing is vacuously true.
-        assert!(
-            run(r#"{ "type": "file", "for_each": "apps/*", "files": ["package.json"] }"#)
-                .is_empty()
-        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

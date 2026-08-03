@@ -89,10 +89,6 @@ pub(crate) enum Rule {
         state: FileState,
         /// Literal paths, or glob patterns when they contain `*`/`?`/`[`/`{`.
         files: Vec<String>,
-        /// A glob matching directories. When set, every entry in `files` is
-        /// checked inside each matching directory instead of once at the top.
-        #[serde(default)]
-        for_each: Option<String>,
     },
     #[serde(rename = "directory")]
     Directory {
@@ -107,10 +103,6 @@ pub(crate) enum Rule {
         /// at least one. Unset skips the check.
         #[serde(default)]
         empty: Option<bool>,
-        /// A glob matching directories. When set, every entry in
-        /// `directories` is checked inside each matching directory.
-        #[serde(default)]
-        for_each: Option<String>,
     },
     #[serde(rename = "content")]
     Content {
@@ -145,17 +137,11 @@ impl Rule {
     /// Every path-shaped attribute of this rule, for validation. `content` and
     /// `checksum` name a single file and never take a pattern: they read one
     /// document, so fanning out across matches would change what they assert.
-    fn patterns(&self) -> Vec<&String> {
+    fn patterns(&self) -> &[String] {
         match self {
-            Rule::File {
-                files, for_each, ..
-            } => files.iter().chain(for_each).collect(),
-            Rule::Directory {
-                directories,
-                for_each,
-                ..
-            } => directories.iter().chain(for_each).collect(),
-            Rule::Content { .. } | Rule::Checksum { .. } => Vec::new(),
+            Rule::File { files, .. } => files,
+            Rule::Directory { directories, .. } => directories,
+            Rule::Content { .. } | Rule::Checksum { .. } => &[],
         }
     }
 }
