@@ -10,6 +10,8 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
 ### Added
 
 - **Glob patterns** in `file`'s `files` and `directory`'s `directories`. An
@@ -153,7 +155,8 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
   declarative JSON(C) rule file, distributed on npm as prebuilt native
   binaries for Linux (x64/arm64), macOS (x64/arm64) and Windows (x64).
 
-[unreleased]: https://github.com/codebase-jp/ruleman/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/codebase-jp/ruleman/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/codebase-jp/ruleman/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codebase-jp/ruleman/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/codebase-jp/ruleman/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/codebase-jp/ruleman/compare/v0.1.1...v0.1.2
