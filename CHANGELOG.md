@@ -10,6 +10,8 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-03
+
 ### Added
 
 - **YAML and TOML** for `content`'s `format`, alongside `json`. All three are
@@ -31,6 +33,14 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
 - Integration tests that run the built binary (`tests/cli.rs`), covering exit
   codes, the three output formats, config discovery and `--config`, and what
   `init` and `add` write to disk. That surface was only ever checked by hand.
+
+### Changed
+
+- A `content` or `checksum` `file` containing `*`, `?`, `[` or `{` is now a
+  pattern rather than a literal path — including a real filename that happens
+  to contain one, which would now be read as a glob (and rejected at load time
+  if it isn't a valid one). `file` and `directory` entries have behaved this way
+  since 0.3.0.
 
 ## [0.3.0] - 2026-08-03
 
@@ -177,7 +187,8 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
   declarative JSON(C) rule file, distributed on npm as prebuilt native
   binaries for Linux (x64/arm64), macOS (x64/arm64) and Windows (x64).
 
-[unreleased]: https://github.com/codebase-jp/ruleman/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/codebase-jp/ruleman/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/codebase-jp/ruleman/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/codebase-jp/ruleman/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codebase-jp/ruleman/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/codebase-jp/ruleman/compare/v0.1.2...v0.1.3
