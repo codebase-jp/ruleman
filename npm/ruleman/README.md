@@ -5,6 +5,7 @@ config.
 
 ```sh
 npx ruleman init
+npx ruleman add README.md
 npx ruleman
 ```
 

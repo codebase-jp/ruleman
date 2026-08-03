@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use jsonc_parser::cst::{CstArray, CstInputValue, CstObject, CstRootNode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -43,15 +44,39 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Add existing files/directories to the config as existence rules.
+    ///
+    /// Each path must exist; whether it becomes a `file` or a `directory`
+    /// rule is decided by what's on disk. Paths are stored relative to the
+    /// config file, and comments/formatting in the config are preserved.
+    Add {
+        /// Paths to add, relative to the current directory.
+        #[arg(required = true)]
+        paths: Vec<String>,
+
+        /// Severity of the rule the paths are added to.
+        #[arg(long, value_enum, default_value_t = Severity::Error)]
+        severity: Severity,
+    },
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 enum Severity {
     #[default]
     Error,
     Warn,
     Off,
+}
+
+impl Severity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warn => "warn",
+            Severity::Off => "off",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -469,18 +494,23 @@ fn run_config(config: Config) -> i32 {
     }
 }
 
+fn resolve_config_path(config_arg: Option<&str>) -> Result<PathBuf, String> {
+    match config_arg {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => discover_config().ok_or_else(|| {
+            "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
+                .to_string()
+        }),
+    }
+}
+
 fn run(config_arg: Option<&str>) -> i32 {
-    let config_path = match config_arg {
-        Some(path) => PathBuf::from(path),
-        None => match discover_config() {
-            Some(path) => path,
-            None => {
-                eprintln!(
-                    "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
-                );
-                return 1;
-            }
-        },
+    let config_path = match resolve_config_path(config_arg) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("{}", message);
+            return 1;
+        }
     };
 
     let mut visited = HashSet::new();
@@ -519,10 +549,290 @@ fn run_init(force: bool) -> i32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathKind {
+    File,
+    Directory,
+}
+
+impl PathKind {
+    /// The `type` discriminant of the rule this kind is added to.
+    fn rule_type(self) -> &'static str {
+        match self {
+            PathKind::File => "file",
+            PathKind::Directory => "directory",
+        }
+    }
+
+    /// The rule field holding the paths (`file`'s `files`, `directory`'s `directories`).
+    fn paths_field(self) -> &'static str {
+        match self {
+            PathKind::File => "files",
+            PathKind::Directory => "directories",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PathKind::File => "ファイル",
+            PathKind::Directory => "ディレクトリ",
+        }
+    }
+}
+
+/// Rewrites a cwd-relative path into one relative to the config file's own
+/// directory, matching how rule paths are resolved at check time (see
+/// `resolve_rule_paths`). Always emits `/` separators so configs stay
+/// portable across platforms.
+fn path_relative_to_config(config_path: &Path, input: &str) -> Result<String, String> {
+    let config_dir = match config_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let base = fs::canonicalize(&config_dir).map_err(|e| {
+        format!(
+            "[ruleman] 設定ファイルのディレクトリ '{}' を解決できません: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+    let target = fs::canonicalize(input)
+        .map_err(|e| format!("[ruleman] '{}' を解決できません: {}", input, e))?;
+
+    let relative = target.strip_prefix(&base).map_err(|_| {
+        format!(
+            "[ruleman] '{}' は設定ファイル '{}' のディレクトリの外にあります。",
+            input,
+            config_path.display()
+        )
+    })?;
+
+    let joined = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if joined.is_empty() {
+        Err(format!(
+            "[ruleman] '{}' は設定ファイルのディレクトリそのものです。",
+            input
+        ))
+    } else {
+        Ok(joined)
+    }
+}
+
+/// Reads a string-valued property off a rule object, if present and a string.
+fn cst_string_prop(object: &CstObject, name: &str) -> Option<String> {
+    object
+        .get(name)?
+        .value()?
+        .as_string_lit()?
+        .decoded_value()
+        .ok()
+}
+
+/// Reads the string elements of an array-valued property, ignoring any
+/// element that isn't a string.
+fn cst_string_array(array: &CstArray) -> Vec<String> {
+    array
+        .elements()
+        .iter()
+        .filter_map(|element| element.as_string_lit())
+        .filter_map(|literal| literal.decoded_value().ok())
+        .collect()
+}
+
+struct AddOutcome {
+    text: String,
+    added: Vec<(PathKind, String)>,
+    skipped: Vec<String>,
+}
+
+/// Adds `entries` (paths already made relative to the config file) to the
+/// config text as `state: "present"` rules. Paths are appended to an existing
+/// rule of the same type, state and severity when there is one, otherwise a
+/// new rule is appended to `rules`. Editing happens on the JSONC concrete
+/// syntax tree, so comments, formatting and trailing commas survive.
+fn add_entries_to_config_text(
+    text: &str,
+    entries: &[(PathKind, String)],
+    severity: Severity,
+) -> Result<AddOutcome, String> {
+    let root = CstRootNode::parse(text, &jsonc_parser::ParseOptions::default())
+        .map_err(|e| e.to_string())?;
+    let object = root.object_value_or_set();
+    let rules = object
+        .array_value_or_create("rules")
+        .ok_or_else(|| "'rules' が配列ではありません。".to_string())?;
+
+    let mut added = Vec::new();
+    let mut skipped = Vec::new();
+
+    for (kind, path) in entries {
+        let mut duplicate = false;
+        let mut target = None;
+
+        for element in rules.elements() {
+            let Some(rule) = element.as_object() else {
+                continue;
+            };
+            if cst_string_prop(&rule, "type").as_deref() != Some(kind.rule_type()) {
+                continue;
+            }
+            // A rule without `state` defaults to `present`, the state this
+            // command writes; anything else checks something different.
+            if cst_string_prop(&rule, "state").unwrap_or_else(|| "present".to_string()) != "present"
+            {
+                continue;
+            }
+            let Some(paths) = rule.array_value(kind.paths_field()) else {
+                continue;
+            };
+            if cst_string_array(&paths).iter().any(|p| p == path) {
+                duplicate = true;
+                break;
+            }
+            let rule_severity = cst_string_prop(&rule, "severity")
+                .unwrap_or_else(|| Severity::default().as_str().to_string());
+            if target.is_none() && rule_severity == severity.as_str() {
+                target = Some(paths);
+            }
+        }
+
+        if duplicate {
+            skipped.push(path.clone());
+            continue;
+        }
+
+        match target {
+            Some(paths) => {
+                paths.append(CstInputValue::String(path.clone()));
+            }
+            None => {
+                rules.append(CstInputValue::Object(vec![
+                    (
+                        "type".to_string(),
+                        CstInputValue::String(kind.rule_type().to_string()),
+                    ),
+                    (
+                        "severity".to_string(),
+                        CstInputValue::String(severity.as_str().to_string()),
+                    ),
+                    (
+                        "state".to_string(),
+                        CstInputValue::String("present".to_string()),
+                    ),
+                    (
+                        kind.paths_field().to_string(),
+                        CstInputValue::Array(vec![CstInputValue::String(path.clone())]),
+                    ),
+                ]));
+            }
+        }
+        added.push((*kind, path.clone()));
+    }
+
+    Ok(AddOutcome {
+        text: root.to_string(),
+        added,
+        skipped,
+    })
+}
+
+fn run_add(config_arg: Option<&str>, paths: &[String], severity: Severity) -> i32 {
+    let config_path = match resolve_config_path(config_arg) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("{}", message);
+            return 1;
+        }
+    };
+
+    let text = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!(
+                "::error::[ruleman] 設定ファイル '{}' の読み込みに失敗しました: {}",
+                config_path.display(),
+                e
+            );
+            return 1;
+        }
+    };
+
+    let mut entries = Vec::new();
+    for path in paths {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                eprintln!(
+                    "::error::[ruleman] '{}' が見つかりません。既存のファイルまたはディレクトリを指定してください。",
+                    path
+                );
+                return 1;
+            }
+        };
+        let kind = if metadata.is_dir() {
+            PathKind::Directory
+        } else {
+            PathKind::File
+        };
+        match path_relative_to_config(&config_path, path) {
+            Ok(relative) => entries.push((kind, relative)),
+            Err(message) => {
+                eprintln!("::error::{}", message);
+                return 1;
+            }
+        }
+    }
+
+    let outcome = match add_entries_to_config_text(&text, &entries, severity) {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            eprintln!(
+                "::error::[ruleman] 設定ファイル '{}' の更新に失敗しました: {}",
+                config_path.display(),
+                message
+            );
+            return 1;
+        }
+    };
+
+    for path in &outcome.skipped {
+        println!("[ruleman] '{}' は既に登録されています。", path);
+    }
+
+    if outcome.added.is_empty() {
+        return 0;
+    }
+
+    if let Err(e) = fs::write(&config_path, &outcome.text) {
+        eprintln!(
+            "::error::[ruleman] 設定ファイル '{}' の書き込みに失敗しました: {}",
+            config_path.display(),
+            e
+        );
+        return 1;
+    }
+
+    for (kind, path) in &outcome.added {
+        println!(
+            "[ruleman] {} '{}' を '{}' に追加しました。",
+            kind.label(),
+            path,
+            config_path.display()
+        );
+    }
+    0
+}
+
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
         Some(Command::Init { force }) => run_init(force),
+        Some(Command::Add { paths, severity }) => run_add(cli.config.as_deref(), &paths, severity),
         None => run(cli.config.as_deref()),
     };
     std::process::exit(code);
@@ -681,6 +991,149 @@ mod tests {
         let base = Path::new("some").join("proj");
         let expected = base.join("README.md").to_string_lossy().into_owned();
         assert_eq!(join_relative(&base, "README.md"), expected);
+    }
+
+    #[test]
+    fn add_appends_to_an_existing_matching_rule_and_keeps_comments() {
+        let text = r#"{
+  // required files
+  "rules": [
+    { "type": "file", "files": ["README.md"] }
+  ]
+}
+"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[(PathKind::File, "LICENSE".to_string())],
+            Severity::Error,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.added, vec![(PathKind::File, "LICENSE".to_string())]);
+        assert!(outcome.skipped.is_empty());
+        assert!(outcome.text.contains("// required files"));
+        assert!(outcome.text.contains(r#"["README.md", "LICENSE"]"#));
+    }
+
+    #[test]
+    fn add_creates_a_new_rule_when_no_rule_matches() {
+        let text = r#"{ "rules": [ { "type": "file", "files": ["README.md"] } ] }"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[(PathKind::Directory, "src".to_string())],
+            Severity::Error,
+        )
+        .unwrap();
+
+        let config = parse_config_text(&outcome.text).unwrap();
+        assert_eq!(config.rules.len(), 2);
+        match &config.rules[1] {
+            Rule::Directory {
+                severity,
+                state,
+                directories,
+                ..
+            } => {
+                assert_eq!(*severity, Severity::Error);
+                assert_eq!(*state, FileState::Present);
+                assert_eq!(directories, &["src".to_string()]);
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn add_does_not_merge_into_a_rule_with_a_different_severity_or_state() {
+        let text = r#"{
+            "rules": [
+                { "type": "file", "severity": "warn", "files": ["a.txt"] },
+                { "type": "file", "state": "absent", "files": ["b.txt"] }
+            ]
+        }"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[(PathKind::File, "c.txt".to_string())],
+            Severity::Error,
+        )
+        .unwrap();
+
+        let config = parse_config_text(&outcome.text).unwrap();
+        assert_eq!(config.rules.len(), 3);
+        match &config.rules[2] {
+            Rule::File { files, .. } => assert_eq!(files, &["c.txt".to_string()]),
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn add_skips_paths_already_covered_by_a_present_rule() {
+        let text =
+            r#"{ "rules": [ { "type": "file", "severity": "warn", "files": ["README.md"] } ] }"#;
+        let outcome = add_entries_to_config_text(
+            text,
+            &[(PathKind::File, "README.md".to_string())],
+            Severity::Error,
+        )
+        .unwrap();
+
+        assert!(outcome.added.is_empty());
+        assert_eq!(outcome.skipped, vec!["README.md".to_string()]);
+        assert_eq!(parse_config_text(&outcome.text).unwrap().rules.len(), 1);
+    }
+
+    #[test]
+    fn add_creates_the_rules_array_when_missing() {
+        let outcome = add_entries_to_config_text(
+            "{}",
+            &[(PathKind::File, "README.md".to_string())],
+            Severity::Warn,
+        )
+        .unwrap();
+
+        let config = parse_config_text(&outcome.text).unwrap();
+        match &config.rules[0] {
+            Rule::File {
+                severity, files, ..
+            } => {
+                assert_eq!(*severity, Severity::Warn);
+                assert_eq!(files, &["README.md".to_string()]);
+            }
+            _ => panic!("unexpected rule"),
+        }
+    }
+
+    #[test]
+    fn add_rejects_a_non_array_rules_property() {
+        assert!(
+            add_entries_to_config_text(
+                r#"{ "rules": {} }"#,
+                &[(PathKind::File, "README.md".to_string())],
+                Severity::Error,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn path_relative_to_config_uses_slashes_and_rejects_outside_paths() {
+        let dir = std::env::temp_dir().join("ruleman_test_add_relative");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let config_path = dir.join("ruleman.json");
+        fs::write(&config_path, "{}").unwrap();
+        let nested = dir.join("src").join("main.rs");
+        fs::write(&nested, "").unwrap();
+
+        assert_eq!(
+            path_relative_to_config(&config_path, &nested.to_string_lossy()).unwrap(),
+            "src/main.rs"
+        );
+        assert!(path_relative_to_config(&config_path, &dir.to_string_lossy()).is_err());
+        assert!(
+            path_relative_to_config(&config_path, &std::env::temp_dir().to_string_lossy()).is_err()
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

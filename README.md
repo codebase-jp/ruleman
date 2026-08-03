@@ -25,8 +25,9 @@ Prebuilt native binaries are published for Linux (x64/arm64), macOS
 ## Quick start
 
 ```sh
-npx ruleman init   # scaffolds ruleman.json
-npx ruleman        # runs the checks
+npx ruleman init             # scaffolds ruleman.json
+npx ruleman add README.md    # adds an existing file as a rule
+npx ruleman                  # runs the checks
 ```
 
 `ruleman.json`:
@@ -115,7 +116,15 @@ Config files may use comments and trailing commas (JSONC).
 ```text
 ruleman [--config <path>]     # run checks (default command)
 ruleman init [--force]        # scaffold a starter ruleman.json
+ruleman add <path>...         # add existing paths as existence rules
 ```
+
+`add` registers paths that already exist in the repo. With no options it writes
+an existence check (`state: "present"`, `severity: "error"`); pass
+`--severity warn|off` to change that. What's on disk decides the rule type —
+files go into a `file` rule, directories into a `directory` rule. Paths are
+stored relative to the config file, merged into a matching existing rule when
+there is one, and the config's comments and formatting are preserved.
 
 ## Building from source
 

@@ -22,8 +22,9 @@ Prebuilt native binaries are published for Linux (x64/arm64), macOS
 ## Quick start
 
 ```sh
-npx ruleman init   # scaffolds ruleman.json
-npx ruleman        # runs the checks
+npx ruleman init             # scaffolds ruleman.json
+npx ruleman add README.md    # adds an existing file as a rule
+npx ruleman                  # runs the checks
 ```
 
 ```jsonc
@@ -171,9 +172,38 @@ commas are allowed.
 ```text
 ruleman [--config <path>]     # run checks (default command)
 ruleman init [--force]        # scaffold a starter ruleman.json
+ruleman add <path>...         # add existing paths as existence rules
 ruleman --version
 ruleman --help
 ```
+
+### `add`
+
+Registers paths that already exist in the repo, so you don't have to hand-edit
+the config to lock in a file that's there today:
+
+```sh
+ruleman add README.md .github/workflows   # one file rule, one directory rule
+ruleman add --severity warn CHANGELOG.md
+```
+
+With no options it writes an existence check — `state: "present"` at
+`severity: "error"`. Each path must exist, and what's on disk decides the rule
+type: a regular file goes into a `file` rule's `files`, a directory into a
+`directory` rule's `directories`.
+
+Paths are appended to an existing rule with the same type, `state` and
+`severity` when there is one, otherwise a new rule is appended to `rules`.
+Paths already covered by a matching `present` rule are reported and skipped.
+
+Arguments are interpreted relative to the current directory but stored relative
+to the config file (with `/` separators), matching how rule paths resolve at
+check time — so `ruleman add main.rs` from `src/` writes `src/main.rs` into a
+config at the repo root. Paths outside the config file's directory are
+rejected.
+
+Edits are applied to the config's syntax tree rather than reserialized, so
+comments, indentation and trailing commas are preserved.
 
 ## Building from source
 
