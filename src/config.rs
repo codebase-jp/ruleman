@@ -30,6 +30,7 @@ pub(crate) struct RawConfig {
     pub(crate) rules: Vec<Rule>,
 }
 
+#[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) rules: Vec<Rule>,
 }
@@ -161,10 +162,27 @@ pub(crate) fn resolve_rule_paths(rule: Rule, base_dir: &Path) -> Rule {
     }
 }
 
-/// Resolves `extends` recursively (relative to each config file's own directory),
-/// concatenating rules from extended configs first, followed by the file's own rules.
-/// Every rule's file paths are resolved relative to the config file that declared them.
+/// Resolves `extends` recursively, concatenating rules from extended configs
+/// first, followed by the file's own rules.
 pub(crate) fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Config, String> {
+    load_config_from(path, visited, None)
+}
+
+/// `inherited_base` is where this config's rule paths resolve to, when that
+/// isn't the config's own directory.
+///
+/// A config in the repo checks paths relative to itself, so `extends`-ing a
+/// sibling file behaves the same wherever `ruleman` runs. A config from an
+/// installed package can't: its own directory is inside `node_modules`, and a
+/// shared rule saying `files: ["LICENSE"]` means the *consuming* repo's
+/// LICENSE, not the package's. So a package-resolved config inherits the base
+/// of the config that extended it, and passes that on down its own `extends`
+/// chain.
+fn load_config_from(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    inherited_base: Option<&Path>,
+) -> Result<Config, String> {
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(canonical.clone()) {
         return Err(format!(
@@ -174,21 +192,106 @@ pub(crate) fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result
     }
 
     let raw = load_raw_config(path)?;
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let own_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let rule_base = inherited_base.unwrap_or(own_dir);
 
     let mut rules = Vec::new();
     for extend in &raw.extends {
-        let extended_path = base_dir.join(extend);
-        let extended = load_config(&extended_path, visited)?;
+        let (extended_path, extended_base) = if is_path_target(extend) {
+            (own_dir.join(extend), inherited_base)
+        } else {
+            (resolve_package_extends(extend, own_dir)?, Some(rule_base))
+        };
+        let extended = load_config_from(&extended_path, visited, extended_base)?;
         rules.extend(extended.rules);
     }
     rules.extend(
         raw.rules
             .into_iter()
-            .map(|rule| resolve_rule_paths(rule, base_dir)),
+            .map(|rule| resolve_rule_paths(rule, rule_base)),
     );
 
     Ok(Config { rules })
+}
+
+/// Locates an `extends` target that names a package rather than a path: looked
+/// up in `node_modules` walking up from the config file, the same shape as
+/// eslint's and tsconfig's shareable configs. Resolution is offline — the
+/// package has to be installed, so what a run checks against is pinned by the
+/// lockfile rather than fetched over the network at check time.
+fn resolve_package_extends(target: &str, base_dir: &Path) -> Result<PathBuf, String> {
+    let (package, subpath) = split_package_target(target);
+
+    // Canonicalized so the walk reaches the filesystem root even when the
+    // config file was found at a relative path like `../ruleman.json`.
+    let start = if base_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base_dir
+    };
+    let mut dir = fs::canonicalize(start).map_err(|e| {
+        format!(
+            "cannot resolve '{}' from '{}': {}",
+            target,
+            start.display(),
+            e
+        )
+    })?;
+
+    loop {
+        let package_dir = dir.join("node_modules").join(&package);
+        if package_dir.is_dir() {
+            return match subpath {
+                Some(subpath) => Ok(package_dir.join(subpath)),
+                None => package_config(&package_dir).ok_or_else(|| {
+                    format!(
+                        "package '{}' has no ruleman config; name the file explicitly, \
+                         e.g. '{}/ruleman.json'",
+                        package, package
+                    )
+                }),
+            };
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    Err(format!(
+        "cannot resolve 'extends' target '{}': install it, or use a relative path",
+        target
+    ))
+}
+
+/// `./x`, `../x`, `/x` and (on Windows) `C:\x` are paths; a bare `x` or `@a/b`
+/// is a package name.
+fn is_path_target(target: &str) -> bool {
+    target.starts_with('.')
+        || target.starts_with('/')
+        || Path::new(target).is_absolute()
+        || target.starts_with('\\')
+}
+
+/// Splits `@scope/pkg/path/to.json` into the package name and the rest.
+fn split_package_target(target: &str) -> (String, Option<String>) {
+    let segments: Vec<&str> = target.split('/').collect();
+    let name_len = if target.starts_with('@') { 2 } else { 1 };
+    if segments.len() <= name_len {
+        return (target.to_string(), None);
+    }
+    (
+        segments[..name_len].join("/"),
+        Some(segments[name_len..].join("/")),
+    )
+}
+
+/// The config file a package exposes, by the same candidate names used for
+/// discovery.
+fn package_config(package_dir: &Path) -> Option<PathBuf> {
+    CONFIG_CANDIDATES
+        .iter()
+        .map(|candidate| package_dir.join(candidate))
+        .find(|path| path.is_file())
 }
 
 /// Searches for a config file in the current directory, then walking up parent
@@ -229,6 +332,104 @@ mod tests {
     use crate::checksum::ChecksumAlgorithm;
     use crate::rule::{ContentFormat, FileState, MatchState, Severity};
     use crate::testdata::DIGEST_ABC;
+
+    #[test]
+    fn extends_targets_are_paths_or_package_names() {
+        assert!(is_path_target("./base.json"));
+        assert!(is_path_target("../shared/base.json"));
+        assert!(is_path_target("/etc/ruleman.json"));
+        assert!(!is_path_target("ruleman-config-acme"));
+        assert!(!is_path_target("@acme/ruleman-config"));
+
+        assert_eq!(
+            split_package_target("@acme/ruleman-config"),
+            ("@acme/ruleman-config".to_string(), None)
+        );
+        assert_eq!(
+            split_package_target("@acme/ruleman-config/strict.json"),
+            (
+                "@acme/ruleman-config".to_string(),
+                Some("strict.json".to_string())
+            )
+        );
+        assert_eq!(
+            split_package_target("acme-config"),
+            ("acme-config".to_string(), None)
+        );
+        assert_eq!(
+            split_package_target("acme-config/nested/strict.json"),
+            (
+                "acme-config".to_string(),
+                Some("nested/strict.json".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn extends_resolves_a_package_from_node_modules() {
+        let dir = std::env::temp_dir().join("ruleman_test_extends_pkg");
+        let _ = fs::remove_dir_all(&dir);
+        // The package lives above the config file, as it would in a monorepo
+        // where only the repo root has node_modules.
+        let package = dir.join("node_modules/@acme/ruleman-config");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(dir.join("apps/web")).unwrap();
+        fs::write(
+            package.join("ruleman.json"),
+            r#"{ "rules": [ { "type": "file", "files": ["LICENSE"] } ] }"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("strict.jsonc"),
+            r#"{ "rules": [ { "type": "file", "files": ["CODEOWNERS"] } ] }"#,
+        )
+        .unwrap();
+
+        let config_path = dir.join("apps/web/ruleman.json");
+        fs::write(
+            &config_path,
+            r#"{ "extends": ["@acme/ruleman-config"],
+                 "rules": [ { "type": "file", "files": ["README.md"] } ] }"#,
+        )
+        .unwrap();
+
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        assert_eq!(config.rules.len(), 2);
+        // A shared rule checks the consuming repo, not the package it came
+        // from: `files: ["LICENSE"]` must not point inside node_modules.
+        match &config.rules[0] {
+            Rule::File { files, .. } => {
+                assert!(!files[0].contains("node_modules"), "{:?}", files);
+                assert!(files[0].ends_with("web/LICENSE"), "{:?}", files);
+            }
+            _ => panic!("unexpected rule"),
+        }
+
+        // A subpath names a specific file inside the package.
+        fs::write(
+            &config_path,
+            r#"{ "extends": ["@acme/ruleman-config/strict.jsonc"], "rules": [] }"#,
+        )
+        .unwrap();
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        assert_eq!(config.rules.len(), 1);
+
+        // A package that isn't installed says so instead of reporting a
+        // confusing missing-file error for a path nobody wrote.
+        fs::write(
+            &config_path,
+            r#"{ "extends": ["@acme/not-installed"], "rules": [] }"#,
+        )
+        .unwrap();
+        let error = load_config(&config_path, &mut HashSet::new()).unwrap_err();
+        assert!(
+            error.contains("cannot resolve 'extends' target"),
+            "{}",
+            error
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn parses_jsonc_with_comments_and_trailing_commas() {

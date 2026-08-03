@@ -10,6 +10,61 @@ release's [GitHub release notes](https://github.com/codebase-jp/ruleman/releases
 
 ## [Unreleased]
 
+### Added
+
+- **Glob patterns** in `file`'s `files` and `directory`'s `directories`. An
+  entry containing `*`, `?`, `[` or `{` is matched against the working tree;
+  anything else stays a literal path, checked with a single `stat` and never
+  triggering a directory walk. `*` stops at a path separator and `**` crosses
+  one. Dot-prefixed paths are searched (`.github/workflows/*.yml` works) while
+  `.git` and anything matched by `.gitignore` are skipped — a rule shouldn't
+  fire on a build artifact the repo already ignores. Malformed patterns fail at
+  config load time with their rule index.
+- **`for_each`** on `file` and `directory`, a glob matching directories: each
+  entry is then checked inside every matching directory. Patterns and `for_each`
+  are the two quantifiers, kept as separate attributes because which one a rule
+  means is the thing its author has to say — `files: ["packages/*/README.md"]`
+  asserts "at least one package has a README", while
+  `for_each: "packages/*"` with `files: ["README.md"]` asserts "every package
+  does" and reports each one that doesn't. A pattern matching nothing fails
+  `present` and satisfies `absent`; a `for_each` matching no directory is
+  vacuously true.
+- **`comparison`** on `content`: `equals` (default, unchanged), `contains`
+  (substring of a string, element of an array) or `regex`. It's a separate axis
+  from `state`, so any comparison composes with `mismatch` — a regex the value
+  must *not* match is `comparison: "regex"` plus `state: "mismatch"`. Regexes
+  are compiled at config load time, so a malformed pattern or a non-string
+  `expected` fails with its rule index instead of silently never matching.
+- **`extends` from npm packages.** An entry that isn't a path (`./x`, `/x`) is a
+  package name resolved from `node_modules`, walking up from the config file —
+  the same shape as eslint's shareable configs. A package name alone uses that
+  package's `ruleman.json`; add a subpath to name a specific file. Resolution is
+  offline: the package has to be installed, so what a run checks against is
+  pinned by the lockfile rather than fetched over the network mid-check. Rules
+  from a package check the **consuming** repo — a shared `files: ["LICENSE"]`
+  means your LICENSE, not the copy inside `node_modules`.
+- **`--format`** (`auto` | `github` | `text` | `json`). `auto`, the default,
+  uses GitHub Actions workflow commands when `GITHUB_ACTIONS=true` and plain
+  text otherwise, so local runs are finally readable and non-GitHub CI is
+  usable. `json` emits one document — `{ "diagnostics": [...], "summary": {...} }`,
+  each diagnostic carrying `severity`, `rule`, `file` and `message` — for
+  editors and scripts. Config-level failures go through the same channel, so
+  `--format json` always emits something parseable. The exit code is unchanged
+  in every format: `1` if any error was reported.
+- Dot-separated `key`s in `content` index into arrays: `workspaces.0`,
+  `contributors.1.name`. They silently resolved to nothing before.
+
+### Changed
+
+- **Breaking:** CLI messages are in English. The tool spoke Japanese while its
+  docs, schema and history were English; for a package published publicly with
+  English documentation, English messages are the coherent half to keep.
+- **Breaking:** output outside GitHub Actions is plain text rather than
+  `::error::` workflow commands, which were noise in a local terminal. Pass
+  `--format github` to keep the old shape everywhere.
+- `content` failures report the value they actually found and the comparison
+  that was applied, instead of a generic "validation failed".
+
 ## [0.2.0] - 2026-08-03
 
 ### Added

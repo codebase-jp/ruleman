@@ -64,7 +64,7 @@ config file to get autocomplete and validation in editors that support the
 | Field     | Type       | Description                                                                                                         |
 | --------- | ---------- | --------------------------------------------------------------------------------------------------------------------- |
 | `$schema` | `string`   | Optional; points editors at the JSON Schema.                                                                        |
-| `extends` | `string[]` | Other ruleman config files to inherit rules from, resolved relative to this file. Cycles are detected and rejected. |
+| `extends` | `string[]` | Other ruleman configs to inherit rules from: a path, or an installed npm package. Cycles are detected and rejected. |
 | `rules`   | `Rule[]`   | The checks to run, in order.                                                                                         |
 
 Every rule accepts a `severity`:
@@ -82,13 +82,15 @@ file** — a directory with the same name does not satisfy it.
 
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
-{ "type": "file", "state": "absent", "files": ["yarn.lock"] }
+{ "type": "file", "state": "absent", "files": ["yarn.lock", "**/*.log"] }
+{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
 ```
 
-| Field   | Type                      | Required | Description                                                                                              |
-| ------- | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `files` | `string[]`                | yes      | Paths to check (repo-relative).                                                                          |
-| `state` | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a regular file; `"absent"` fails if anything exists there. |
+| Field      | Type                      | Required | Description                                                                                              |
+| ---------- | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `files`    | `string[]`                | yes      | Paths to check (repo-relative). An entry containing `*`, `?`, `[` or `{` is a [glob pattern](#globs).    |
+| `state`    | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a regular file; `"absent"` fails if anything exists there. |
+| `for_each` | `string`                  | no       | A glob matching directories; each `files` entry is checked inside every match. See [globs](#globs).      |
 
 ### `directory`
 
@@ -101,13 +103,15 @@ shouldn't leak into `file`'s schema.
 ```jsonc
 { "type": "directory", "state": "present", "directories": [".github/workflows"] }
 { "type": "directory", "directories": ["dist"], "empty": false }
+{ "type": "directory", "state": "absent", "for_each": "packages/*", "directories": ["node_modules"] }
 ```
 
 | Field         | Type                      | Required | Description                                                                                                            |
 | ------------- | ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `directories` | `string[]`                | yes      | Paths to check (repo-relative).                                                                                        |
+| `directories` | `string[]`                | yes      | Paths to check (repo-relative). An entry with `*`, `?`, `[` or `{` is a [glob pattern](#globs).                        |
 | `state`       | `"present"` \| `"absent"` | no       | `"present"` (default) fails if missing or not a directory; `"absent"` fails if anything exists there.                  |
 | `empty`       | `boolean`                 | no       | If set, additionally requires zero (`true`) or at least one (`false`) entries. Only checked when `state` is `present`. |
+| `for_each`    | `string`                  | no       | A glob matching directories; each `directories` entry is checked inside every match. See [globs](#globs).              |
 
 ### `content`
 
@@ -117,26 +121,43 @@ supported, `format` selects the parser and the rule type itself stays
 `content`. Named to pair with `file`: `file` checks whether a file exists,
 `content` checks what's inside it.
 
-`state: "match"` (default) fails unless `key` (a dot-separated path) in
-`file` equals `expected`; `state: "mismatch"` fails when it does.
+`comparison` decides *how* the value at `key` is compared with `expected`, and
+`state` decides *whether that comparison has to hold* — two independent axes, so
+every comparison also works negated:
 
 ```jsonc
-{
-  "type": "content",
-  "format": "json",
-  "file": "package.json",
-  "key": "engines.node",
-  "expected": ">=18"
-}
+// engines.node is exactly ">=18"
+{ "type": "content", "file": "package.json", "key": "engines.node", "expected": ">=18" }
+
+// engines.node mentions 18 somewhere
+{ "type": "content", "comparison": "contains", "file": "package.json",
+  "key": "engines.node", "expected": "18" }
+
+// workspaces lists packages/*
+{ "type": "content", "comparison": "contains", "file": "package.json",
+  "key": "workspaces", "expected": "packages/*" }
+
+// the package name is scoped
+{ "type": "content", "comparison": "regex", "file": "package.json",
+  "key": "name", "expected": "^@acme/" }
+
+// ...and must not be published as UNLICENSED
+{ "type": "content", "comparison": "regex", "state": "mismatch",
+  "file": "package.json", "key": "license", "expected": "^UNLICENSED$" }
 ```
 
-| Field      | Type                      | Required | Description                                                              |
-| ---------- | ------------------------- | -------- | ------------------------------------------------------------------------ |
-| `format`   | `"json"`                  | no       | Parser to use. `"json"` (default); `yaml`/`toml` planned.                |
-| `file`     | `string`                  | yes      | Path to the file.                                                        |
-| `key`      | `string`                  | yes      | Dot-separated path into the parsed document.                             |
-| `expected` | any                       | yes      | The value `key` is compared against.                                     |
-| `state`    | `"match"` \| `"mismatch"` | no       | `"match"` (default) requires equality; `"mismatch"` requires inequality. |
+`key` is a dot-separated path, and a numeric segment indexes into an array:
+`workspaces.0`, `contributors.1.name`. A key that isn't there fails every
+comparison.
+
+| Field        | Type                                      | Required | Description                                                                                       |
+| ------------ | ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `format`     | `"json"`                                  | no       | Parser to use. `"json"` (default); `yaml`/`toml` planned.                                          |
+| `file`       | `string`                                  | yes      | Path to the file.                                                                                 |
+| `key`        | `string`                                  | yes      | Dot-separated path into the parsed document; numeric segments index arrays.                        |
+| `expected`   | any                                       | yes      | The value `key` is compared against. Must be a string when `comparison` is `"regex"`.             |
+| `comparison` | `"equals"` \| `"contains"` \| `"regex"`   | no       | `"equals"` (default) deep equality; `"contains"` substring of a string or element of an array; `"regex"` the value must match. |
+| `state`      | `"match"` \| `"mismatch"`                 | no       | `"match"` (default) requires the comparison to hold; `"mismatch"` requires it to fail.            |
 
 ### `checksum`
 
@@ -171,27 +192,80 @@ and re-run the same command to refresh it after an intentional change.
 
 ### `extends`
 
-Share rules across repos or config files:
+Share rules across config files, or across repos:
 
 ```jsonc
 // ruleman.json
 {
-  "extends": ["./base.ruleman.json"],
+  "extends": [
+    "./base.ruleman.json",        // a file in this repo
+    "@acme/ruleman-config",       // an installed npm package
+    "@acme/ruleman-config/strict.jsonc"  // a specific file inside one
+  ],
   "rules": [{ "type": "file", "files": ["CHANGELOG.md"] }]
 }
 ```
 
 Rules from extended files run first, in the order listed, followed by the
-file's own rules. `extends` paths are resolved relative to the file that
-declares them, and circular references are rejected with an error.
+file's own rules. Circular references are rejected with an error.
+
+An entry starting with `.` or `/` is a path, resolved relative to the file that
+declares it. Anything else is an npm package name, looked up in `node_modules`
+walking up from the config file — the same shape as eslint's shareable configs
+and tsconfig's `extends`. A package name alone uses that package's
+`ruleman.json` / `ruleman.jsonc` / `.ruleman.json`; add a subpath to name a
+specific file.
+
+Package resolution is **offline**: the package has to be installed, so what a
+run checks against is pinned by your lockfile rather than fetched over the
+network mid-check. If it isn't installed, the run says so rather than reporting
+a confusing missing-file error.
+
+Rules from a package check the **consuming** repo. A shared
+`files: ["LICENSE"]` means your LICENSE, not the one inside `node_modules` —
+so a package's rules resolve against the config that extended it, all the way
+down the package's own `extends` chain.
 
 ### Path resolution
 
-`file`'s `files`, `content`'s `file`, and `extends` paths are all resolved
-relative to the config file that declares them — not the directory
-`ruleman` is invoked from. This keeps results consistent whether you run
-`ruleman` from the repo root, from a subdirectory (via upward config
-discovery), or via `extends` pulling in rules defined in another directory.
+`file`'s `files`, `directory`'s `directories`, `for_each`, `content`'s and
+`checksum`'s `file`, and path-shaped `extends` entries are all resolved
+relative to the config file that declares them — not the directory `ruleman` is
+invoked from. This keeps results consistent whether you run `ruleman` from the
+repo root, from a subdirectory (via upward config discovery), or via `extends`
+pulling in rules defined elsewhere. The exception is entries under `for_each`,
+which are relative to each directory it matches, and rules from an extended
+package, which resolve against the consuming repo.
+
+### Globs
+
+An entry in `files` / `directories` containing `*`, `?`, `[` or `{` is a glob
+pattern matched against the working tree; anything else is a literal path,
+which is checked with a single `stat` and never triggers a directory walk.
+
+- `*` matches within one path segment; `**` crosses segments.
+  `*.log` matches `debug.log` but not `logs/debug.log`; `**/*.log` matches both.
+- Dot-prefixed paths are searched, so `.github/workflows/*.yml` works.
+- `.git` and anything matched by `.gitignore` are skipped — a rule shouldn't
+  fire on a build artifact the repo already ignores.
+- A malformed pattern is a config error, reported with its rule index before
+  any check runs.
+
+Patterns and `for_each` express the two different quantifiers, which is why
+they are separate attributes rather than one overloaded pattern:
+
+```jsonc
+// "there is at least one": passes as soon as any package has a README
+{ "type": "file", "files": ["packages/*/README.md"] }
+
+// "for all": fails once per package that is missing one
+{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
+```
+
+A pattern that matches nothing fails `state: "present"` (there is no match to
+satisfy it) and satisfies `state: "absent"` (there is nothing to forbid). A
+`for_each` that matches no directory is vacuously true — nothing to check — so
+pair it with a `directory` rule if the directory itself is required.
 
 ### Comments and trailing commas
 
@@ -226,12 +300,34 @@ combined — specifying both is an error, not an AND.
 ## CLI reference
 
 ```text
-ruleman [--config <path>]     # run checks (default command)
-ruleman init [--force]        # scaffold a starter ruleman.json
-ruleman add <path>...         # add existing paths as rules
+ruleman [--config <path>] [--format <fmt>]   # run checks (default command)
+ruleman init [--force]                       # scaffold a starter ruleman.json
+ruleman add <path>...                        # add existing paths as rules
 ruleman --version
 ruleman --help
 ```
+
+### `--format`
+
+How results are reported. Defaults to `auto`.
+
+| Value    | Output                                                                                       |
+| -------- | -------------------------------------------------------------------------------------------- |
+| `auto`   | `github` when `GITHUB_ACTIONS=true`, `text` otherwise.                                       |
+| `github` | GitHub Actions workflow commands (`::error file=...::`), surfaced as annotations on the run. |
+| `text`   | One `error:` / `warning:` line per failure, plus a count. Readable in any terminal or CI.    |
+| `json`   | A single JSON document: `{ "diagnostics": [...], "summary": { "errors": n, "warnings": n } }`. |
+
+Each diagnostic carries `severity`, `rule` (the rule type that produced it),
+`file` (the path it's about, or `null`) and `message`. Config-level failures are
+reported the same way, so `--format json` always emits one parseable document:
+
+```sh
+ruleman --format json | jq '.diagnostics[] | select(.severity == "error") | .file'
+```
+
+The exit code is `1` if any error was reported and `0` otherwise, in every
+format — `warn` never fails the run.
 
 ### `add`
 

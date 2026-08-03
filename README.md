@@ -64,7 +64,7 @@ override discovery.
 | Field     | Type       | Description                                                                                                         |
 | --------- | ---------- | ------------------------------------------------------------------------------------------------------------------- |
 | `$schema` | `string`   | Optional; points editors at the JSON Schema for autocomplete/validation.                                            |
-| `extends` | `string[]` | Other ruleman config files to inherit rules from, resolved relative to this file. Cycles are detected and rejected. |
+| `extends` | `string[]` | Other ruleman configs to inherit rules from: a path, or an installed npm package. Cycles are detected and rejected. |
 | `rules`   | `Rule[]`   | The checks to run, in order.                                                                                        |
 
 Every rule accepts a `severity`: `"error"` (default, fails the run),
@@ -73,12 +73,18 @@ Every rule accepts a `severity`: `"error"` (default, fails the run),
 **`file`** — checks whether listed paths exist **as regular files**,
 Ansible-`file`-module style: `state: "present"` (default) fails if any is
 missing or is actually a directory; `state: "absent"` fails if any exists
-(as anything).
+(as anything). Entries containing `*`, `?`, `[` or `{` are glob patterns;
+`for_each` checks each entry inside every directory a pattern matches.
 
 ```jsonc
 { "type": "file", "state": "present", "files": ["README.md"] }
-{ "type": "file", "state": "absent", "files": ["yarn.lock"] }
+{ "type": "file", "state": "absent", "files": ["yarn.lock", "**/*.log"] }
+{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }
 ```
+
+A pattern asserts "there is at least one match"; `for_each` asserts "for
+all", failing once per directory. `*` stops at a path separator and `**`
+crosses one; `.git` and gitignored paths are skipped.
 
 **`directory`** — same idea, for directories. `empty` optionally requires
 the directory to have zero (`true`) or at least one (`false`) entries;
@@ -90,18 +96,18 @@ omit it to skip the check.
 ```
 
 **`content`** — checks a value inside a structured file. `format` selects
-the parser (currently `"json"`; `yaml`/`toml` planned). `state: "match"`
-(default) fails unless `key` (dot-separated path) equals `expected`;
-`state: "mismatch"` fails when it does.
+the parser (currently `"json"`; `yaml`/`toml` planned). `comparison` selects
+how the value at `key` is compared — `"equals"` (default), `"contains"`
+(substring of a string, element of an array) or `"regex"` — and `state`
+selects whether that comparison must hold (`"match"`, default) or fail
+(`"mismatch"`). `key` is dot-separated, and numeric segments index arrays.
 
 ```jsonc
-{
-  "type": "content",
-  "format": "json",
-  "file": "package.json",
-  "key": "engines.node",
-  "expected": ">=18"
-}
+{ "type": "content", "file": "package.json", "key": "engines.node", "expected": ">=18" }
+{ "type": "content", "comparison": "regex", "file": "package.json",
+  "key": "name", "expected": "^@acme/" }
+{ "type": "content", "comparison": "contains", "file": "package.json",
+  "key": "workspaces", "expected": "packages/*" }
 ```
 
 **`checksum`** — pins a file's exact bytes by hash, for files that should
@@ -120,10 +126,23 @@ it by hand.
 }
 ```
 
-All file paths (`file`'s `files`, `directory`'s `directories`, `content`'s
-and `checksum`'s `file`, and `extends`) are resolved relative to the config
-file that declares them — not the directory `ruleman` is run from — so
-results don't change depending on where you invoke it.
+All file paths (`file`'s `files`, `directory`'s `directories`, `for_each`,
+`content`'s and `checksum`'s `file`, and path-shaped `extends` entries) are
+resolved relative to the config file that declares them — not the directory
+`ruleman` is run from — so results don't change depending on where you
+invoke it.
+
+`extends` also takes npm package names, resolved from `node_modules` walking
+up from the config file, so conventions can be shared across repos as an
+installed package:
+
+```jsonc
+{ "extends": ["@acme/ruleman-config", "./base.ruleman.json"] }
+```
+
+Resolution is offline — the package has to be installed, so what a run
+checks against is pinned by your lockfile. Rules from a package check the
+**consuming** repo, not the copy inside `node_modules`.
 
 Config files may use comments and trailing commas (JSONC).
 
@@ -136,11 +155,16 @@ digest. Failures name the rule by index: `rules[2]: unknown field ...`.
 ## CLI
 
 ```text
-ruleman [--config <path>]     # run checks (default command)
-ruleman init [--force]        # scaffold a starter ruleman.json
-ruleman add <path>...         # add existing paths as rules
-ruleman add --checksum <file>...   # ...pinning their current hash instead
+ruleman [--config <path>] [--format <fmt>]   # run checks (default command)
+ruleman init [--force]                       # scaffold a starter ruleman.json
+ruleman add <path>...                        # add existing paths as rules
+ruleman add --checksum <file>...             # ...pinning their current hash instead
 ```
+
+`--format` picks how results are reported: `auto` (default — GitHub Actions
+workflow commands under Actions, plain text elsewhere), `github`, `text`, or
+`json` for editors and scripts. The exit code is `1` if any error was
+reported, in every format.
 
 `add` registers paths that already exist in the repo. With no options it writes
 an existence check (`state: "present"`, `severity: "error"`); pass

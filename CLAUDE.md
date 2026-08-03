@@ -17,7 +17,11 @@ selected via `optionalDependencies`), the same pattern used by esbuild/Biome.
   - `rule.rs` — the rule types a config can declare, plus `validate_rule`.
   - `config.rs` — finding, parsing and resolving config files (`extends`,
     rule paths relative to the declaring file).
-  - `check.rs` — the check engine: runs each rule, reports failures.
+  - `check.rs` — the check engine: runs each rule, produces diagnostics.
+  - `output.rs` — renders diagnostics as `github`/`text`/`json` and resolves
+    `--format auto`. Nothing else may hard-code a CI vendor's syntax, and
+    user-facing strings are English (see below).
+  - `paths.rs` — expands glob patterns into the paths a rule checks.
   - `checksum.rs` — hashing files and the algorithms `checksum` can name.
   - `config_edit.rs` — rewriting a config file's *text* via the JSONC CST so
     comments and formatting survive. Pure: no filesystem access.
@@ -71,8 +75,12 @@ check, not genuinely different checks:
   scaffolding but diverge in what they actually assert, prefer separate
   rule types over a combinatorial attribute on one type.
 - Keep axes that can vary independently (e.g. `content`'s `format` vs.
-  `state`) as separate attributes rather than cross-producing them into one
-  enum (no `state: "json-match" | "json-mismatch" | "yaml-match" | ...`).
+  `comparison` vs. `state`) as separate attributes rather than cross-producing
+  them into one enum (no `state: "json-match" | "regex-mismatch" | ...`).
+- Keep the two quantifiers distinct. A glob pattern in `files`/`directories`
+  asserts "there is at least one match"; `for_each` asserts "for all" and is
+  evaluated per matching directory. Don't collapse them into one attribute —
+  which one a rule means is exactly the thing an author has to say.
 - Comparison-style rules decompose into independent axes: *what* is compared
   (the rule type — a key inside a parsed document vs. the whole file's
   digest), *how the reference is supplied* (`checksum`'s `algorithm`,
@@ -92,12 +100,25 @@ check, not genuinely different checks:
   AND: the two attributes fill the same slot, so honouring one silently would
   run a check the author didn't ask for. Enforce it in **both** places —
   `oneOf`/`required` in `docs/schema.json` (editor feedback) and
-  `validate_rule` in `src/main.rs` (the CLI never reads the schema). Anything
+  `validate_rule` in `src/rule.rs` (the CLI never reads the schema). Anything
   serde's derives can't express — cross-attribute constraints, value formats
   like `checksum`'s hex digest — belongs in `validate_rule`, which runs per
   rule at load time and reports failures as `rules[<index>]: <reason>`.
   Attributes themselves are strict: `Rule` is `deny_unknown_fields`, so a
   typo is an error rather than a silently ignored attribute.
+
+## Conventions
+
+- User-facing strings (CLI messages, `--help`, docs) are English. Only the
+  conversation with the user may be Japanese.
+- Never `println!`/`eprintln!` a rule failure directly: build a `Diagnostic`
+  and let `output::render` decide the shape, so every format stays in sync.
+- Nothing resolves anything over the network at check time. `extends` of a
+  package reads it from `node_modules`, so a run is reproducible offline and
+  pinned by the consuming repo's lockfile.
+- Rules from a package-resolved `extends` check the *consuming* repo, not the
+  copy in `node_modules` — that's what `load_config_from`'s `inherited_base`
+  carries. A shared `files: ["LICENSE"]` has to mean the user's LICENSE.
 
 ## Local dev
 
