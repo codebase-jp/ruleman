@@ -5,6 +5,7 @@ mod config;
 mod config_edit;
 mod init;
 mod output;
+mod paths;
 mod rule;
 #[cfg(test)]
 mod testdata;

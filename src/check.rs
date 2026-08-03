@@ -4,6 +4,7 @@
 use crate::checksum::file_checksum;
 use crate::config::{Config, load_config, resolve_config_path};
 use crate::output::{Diagnostic, OutputFormat, render};
+use crate::paths::{Target, resolve};
 use crate::rule::{ContentFormat, FileState, MatchState, Rule, Severity};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -52,6 +53,74 @@ pub(crate) fn check_directory_emptiness(
     }
 }
 
+/// Applies a per-path check to whatever an entry resolved to.
+///
+/// A literal path is checked as written, existing or not. A pattern is checked
+/// once per match — and when it matches nothing, `present` fails (it asserts
+/// "there is at least one") while `absent` passes (nothing is there to forbid).
+fn check_paths(
+    target: Target,
+    state: FileState,
+    kind: &str,
+    check: impl Fn(&Path, &str) -> Option<String>,
+) -> Vec<(Option<String>, String)> {
+    match target {
+        Target::Literal(path) => check(Path::new(&path), &path)
+            .map(|message| vec![(Some(path), message)])
+            .unwrap_or_default(),
+        Target::Matched { pattern, paths } if paths.is_empty() => match state {
+            FileState::Present => vec![(
+                None,
+                format!("no {} matches the pattern '{}'", kind, pattern),
+            )],
+            FileState::Absent => Vec::new(),
+        },
+        Target::Matched { paths, .. } => paths
+            .into_iter()
+            .filter_map(|path| check(Path::new(&path), &path).map(|message| (Some(path), message)))
+            .collect(),
+    }
+}
+
+fn check_one_file(path: &Path, display: &str, state: FileState) -> Option<String> {
+    match state {
+        FileState::Absent if path.exists() => {
+            Some(format!("file '{}' must not exist, but it does", display))
+        }
+        FileState::Present if !path.exists() => {
+            Some(format!("required file '{}' is missing", display))
+        }
+        FileState::Present if !path.is_file() => Some(format!(
+            "'{}' must be a regular file, but a directory exists there",
+            display
+        )),
+        _ => None,
+    }
+}
+
+fn check_one_directory(
+    path: &Path,
+    display: &str,
+    state: FileState,
+    empty: Option<bool>,
+) -> Option<String> {
+    match state {
+        FileState::Absent if path.exists() => Some(format!(
+            "directory '{}' must not exist, but it does",
+            display
+        )),
+        FileState::Present if !path.exists() => {
+            Some(format!("required directory '{}' is missing", display))
+        }
+        FileState::Present if !path.is_dir() => Some(format!(
+            "'{}' must be a directory, but a file exists there",
+            display
+        )),
+        FileState::Present => check_directory_emptiness(path, display, empty),
+        FileState::Absent => None,
+    }
+}
+
 pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -61,27 +130,27 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 severity,
                 state,
                 files,
+                for_each,
             } => {
                 if severity == Severity::Off {
                     continue;
                 }
-                for file in files {
-                    let path = Path::new(&file);
-                    let message = match state {
-                        FileState::Absent if path.exists() => {
-                            Some(format!("file '{}' must not exist, but it does", file))
+                for entry in files {
+                    let targets = match resolve(&entry, for_each.as_deref()) {
+                        Ok(targets) => targets,
+                        Err(message) => {
+                            diagnostics.push(Diagnostic::new(severity, "file", None, message));
+                            continue;
                         }
-                        FileState::Present if !path.exists() => {
-                            Some(format!("required file '{}' is missing", file))
-                        }
-                        FileState::Present if !path.is_file() => Some(format!(
-                            "'{}' must be a regular file, but a directory exists there",
-                            file
-                        )),
-                        _ => None,
                     };
-                    if let Some(message) = message {
-                        diagnostics.push(Diagnostic::new(severity, "file", Some(file), message));
+                    for target in targets {
+                        for (path, message) in
+                            check_paths(target, state, "file", |path, display| {
+                                check_one_file(path, display, state)
+                            })
+                        {
+                            diagnostics.push(Diagnostic::new(severity, "file", path, message));
+                        }
                     }
                 }
             }
@@ -90,33 +159,27 @@ pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
                 state,
                 directories,
                 empty,
+                for_each,
             } => {
                 if severity == Severity::Off {
                     continue;
                 }
-                for dir in directories {
-                    let path = Path::new(&dir);
-                    let message = match state {
-                        FileState::Absent if path.exists() => {
-                            Some(format!("directory '{}' must not exist, but it does", dir))
+                for entry in directories {
+                    let targets = match resolve(&entry, for_each.as_deref()) {
+                        Ok(targets) => targets,
+                        Err(message) => {
+                            diagnostics.push(Diagnostic::new(severity, "directory", None, message));
+                            continue;
                         }
-                        FileState::Present if !path.exists() => {
-                            Some(format!("required directory '{}' is missing", dir))
-                        }
-                        FileState::Present if !path.is_dir() => Some(format!(
-                            "'{}' must be a directory, but a file exists there",
-                            dir
-                        )),
-                        FileState::Present => check_directory_emptiness(path, &dir, empty),
-                        FileState::Absent => None,
                     };
-                    if let Some(message) = message {
-                        diagnostics.push(Diagnostic::new(
-                            severity,
-                            "directory",
-                            Some(dir),
-                            message,
-                        ));
+                    for target in targets {
+                        for (path, message) in
+                            check_paths(target, state, "directory", |path, display| {
+                                check_one_directory(path, display, state, empty)
+                            })
+                        {
+                            diagnostics.push(Diagnostic::new(severity, "directory", path, message));
+                        }
                     }
                 }
             }
@@ -401,6 +464,57 @@ mod tests {
             check_config(config)[0]
                 .message
                 .contains("but it is not set")
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn patterns_quantify_differently_from_for_each() {
+        let dir = std::env::temp_dir().join("ruleman_test_patterns");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("packages/a")).unwrap();
+        fs::create_dir_all(dir.join("packages/b")).unwrap();
+        fs::write(dir.join("packages/a/README.md"), "").unwrap();
+        fs::write(dir.join("stray.log"), "").unwrap();
+        let config_path = dir.join("ruleman.json");
+
+        let run = |rules: &str| {
+            fs::write(&config_path, format!(r#"{{ "rules": [ {} ] }}"#, rules)).unwrap();
+            check_config(load_config(&config_path, &mut HashSet::new()).unwrap())
+        };
+
+        // A pattern asserts "at least one": one README is enough.
+        assert!(run(r#"{ "type": "file", "files": ["packages/*/README.md"] }"#).is_empty());
+
+        // `for_each` asserts "for all": the package without one fails.
+        let diagnostics =
+            run(r#"{ "type": "file", "for_each": "packages/*", "files": ["README.md"] }"#);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("packages/b/README.md"));
+
+        // A pattern matching nothing fails `present`...
+        let diagnostics = run(r#"{ "type": "file", "files": ["docs/*.md"] }"#);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("no file matches the pattern")
+        );
+        assert_eq!(diagnostics[0].file, None);
+
+        // ...and satisfies `absent`.
+        assert!(run(r#"{ "type": "file", "state": "absent", "files": ["docs/*.md"] }"#).is_empty());
+
+        // `absent` reports every match, not just the first.
+        let diagnostics = run(r#"{ "type": "file", "state": "absent", "files": ["**/*.log"] }"#);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("stray.log"));
+
+        // `for_each` over nothing is vacuously true.
+        assert!(
+            run(r#"{ "type": "file", "for_each": "apps/*", "files": ["package.json"] }"#)
+                .is_empty()
         );
 
         fs::remove_dir_all(&dir).unwrap();

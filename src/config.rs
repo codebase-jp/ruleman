@@ -82,6 +82,20 @@ pub(crate) fn join_relative(base_dir: &Path, file: &str) -> String {
     }
 }
 
+/// Resolves a rule's path entries against the config file's directory, unless
+/// they are nested under a `for_each` pattern — those are relative to whatever
+/// that pattern matches, and resolving them here would prefix them twice.
+fn resolve_entries(entries: Vec<String>, base_dir: &Path, nested: bool) -> Vec<String> {
+    if nested {
+        entries
+    } else {
+        entries
+            .into_iter()
+            .map(|entry| join_relative(base_dir, &entry))
+            .collect()
+    }
+}
+
 /// Rewrites a rule's file-path fields to be relative to the config file that
 /// declared it, so checks behave the same regardless of the directory
 /// `ruleman` is invoked from (matters once `extends` or upward config
@@ -92,27 +106,27 @@ pub(crate) fn resolve_rule_paths(rule: Rule, base_dir: &Path) -> Rule {
             severity,
             state,
             files,
+            for_each,
         } => Rule::File {
             severity,
             state,
-            files: files
-                .into_iter()
-                .map(|f| join_relative(base_dir, &f))
-                .collect(),
+            // With `for_each`, `files` are relative to each directory it
+            // matches, so only the pattern itself moves with the config file.
+            files: resolve_entries(files, base_dir, for_each.is_some()),
+            for_each: for_each.map(|pattern| join_relative(base_dir, &pattern)),
         },
         Rule::Directory {
             severity,
             state,
             directories,
             empty,
+            for_each,
         } => Rule::Directory {
             severity,
             state,
-            directories: directories
-                .into_iter()
-                .map(|d| join_relative(base_dir, &d))
-                .collect(),
+            directories: resolve_entries(directories, base_dir, for_each.is_some()),
             empty,
+            for_each: for_each.map(|pattern| join_relative(base_dir, &pattern)),
         },
         Rule::Content {
             severity,

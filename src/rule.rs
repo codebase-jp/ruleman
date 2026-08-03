@@ -2,6 +2,7 @@
 //! derives can't express.
 
 use crate::checksum::ChecksumAlgorithm;
+use crate::paths::{compile, is_pattern};
 use clap::ValueEnum;
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,7 +70,12 @@ pub(crate) enum Rule {
         severity: Severity,
         #[serde(default)]
         state: FileState,
+        /// Literal paths, or glob patterns when they contain `*`/`?`/`[`/`{`.
         files: Vec<String>,
+        /// A glob matching directories. When set, every entry in `files` is
+        /// checked inside each matching directory instead of once at the top.
+        #[serde(default)]
+        for_each: Option<String>,
     },
     #[serde(rename = "directory")]
     Directory {
@@ -77,12 +83,17 @@ pub(crate) enum Rule {
         severity: Severity,
         #[serde(default)]
         state: FileState,
+        /// Literal paths, or glob patterns when they contain `*`/`?`/`[`/`{`.
         directories: Vec<String>,
         /// Only checked when `state` is `present` and the path is confirmed
         /// to be a directory: `true` requires zero entries, `false` requires
         /// at least one. Unset skips the check.
         #[serde(default)]
         empty: Option<bool>,
+        /// A glob matching directories. When set, every entry in
+        /// `directories` is checked inside each matching directory.
+        #[serde(default)]
+        for_each: Option<String>,
     },
     #[serde(rename = "content")]
     Content {
@@ -110,11 +121,38 @@ pub(crate) enum Rule {
     },
 }
 
+impl Rule {
+    /// Every path-shaped attribute of this rule, for validation. `content` and
+    /// `checksum` name a single file and never take a pattern: they read one
+    /// document, so fanning out across matches would change what they assert.
+    fn patterns(&self) -> Vec<&String> {
+        match self {
+            Rule::File {
+                files, for_each, ..
+            } => files.iter().chain(for_each).collect(),
+            Rule::Directory {
+                directories,
+                for_each,
+                ..
+            } => directories.iter().chain(for_each).collect(),
+            Rule::Content { .. } | Rule::Checksum { .. } => Vec::new(),
+        }
+    }
+}
+
 /// Cross-attribute checks serde can't express on its own. Mutually exclusive
 /// attributes (a future `url` locator vs. `file`, `expected` vs. a URL the
 /// reference is fetched from) get rejected here too, rather than silently
 /// picking one.
 pub(crate) fn validate_rule(rule: &Rule) -> Result<(), String> {
+    // A malformed glob is a config mistake, so it fails at load time rather
+    // than turning into a per-run check failure.
+    for pattern in rule.patterns() {
+        if is_pattern(pattern) {
+            compile(pattern)?;
+        }
+    }
+
     if let Rule::Checksum {
         algorithm,
         expected,
