@@ -4,12 +4,14 @@ mod checksum;
 mod config;
 mod config_edit;
 mod init;
+mod output;
 mod rule;
 #[cfg(test)]
 mod testdata;
 
 use checksum::ChecksumAlgorithm;
 use clap::{Parser, Subcommand};
+use output::OutputFormat;
 use rule::Severity;
 
 #[derive(Parser, Debug)]
@@ -23,6 +25,12 @@ struct Cli {
     /// is discovered starting from the current directory and walking up.
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// How to report results. `auto` uses GitHub Actions workflow commands
+    /// when running in Actions and plain text otherwise. `json` applies to
+    /// the checks; `add` and `init` report like `text`.
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Auto)]
+    format: OutputFormat,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -67,7 +75,7 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        Some(Command::Init { force }) => init::run(force),
+        Some(Command::Init { force }) => init::run(force, cli.format),
         Some(Command::Add {
             paths,
             severity,
@@ -78,8 +86,9 @@ fn main() {
             &paths,
             severity,
             checksum.then(|| algorithm.unwrap_or_default()),
+            cli.format,
         ),
-        None => check::run(cli.config.as_deref()),
+        None => check::run(cli.config.as_deref(), cli.format),
     };
     std::process::exit(code);
 }

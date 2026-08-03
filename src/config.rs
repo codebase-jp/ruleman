@@ -61,27 +61,14 @@ pub(crate) fn parse_config_text(raw: &str) -> Result<RawConfig, String> {
 
 pub(crate) fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
     if !path.exists() {
-        return Err(format!(
-            "::error::[ruleman] 設定ファイル '{}' が見つかりません。",
-            path.display()
-        ));
+        return Err(format!("config file '{}' not found", path.display()));
     }
 
-    let raw = fs::read_to_string(path).map_err(|e| {
-        format!(
-            "::error::[ruleman] 設定ファイル '{}' の読み込みに失敗しました: {}",
-            path.display(),
-            e
-        )
-    })?;
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config file '{}': {}", path.display(), e))?;
 
-    parse_config_text(&raw).map_err(|e| {
-        format!(
-            "::error::[ruleman] 設定ファイル '{}' の解析に失敗しました: {}",
-            path.display(),
-            e
-        )
-    })
+    parse_config_text(&raw)
+        .map_err(|e| format!("cannot parse config file '{}': {}", path.display(), e))
 }
 
 /// Joins `file` onto `base_dir`, unless `base_dir` is empty (a config file
@@ -165,7 +152,7 @@ pub(crate) fn load_config(path: &Path, visited: &mut HashSet<PathBuf>) -> Result
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(canonical.clone()) {
         return Err(format!(
-            "::error::[ruleman] 設定ファイルの 'extends' が循環しています: '{}'",
+            "circular 'extends' in config file '{}'",
             path.display()
         ));
     }
@@ -215,10 +202,8 @@ pub(crate) fn discover_config() -> Option<PathBuf> {
 pub(crate) fn resolve_config_path(config_arg: Option<&str>) -> Result<PathBuf, String> {
     match config_arg {
         Some(path) => Ok(PathBuf::from(path)),
-        None => discover_config().ok_or_else(|| {
-            "::error::[ruleman] 設定ファイルが見つかりません。'ruleman init' で作成できます。"
-                .to_string()
-        }),
+        None => discover_config()
+            .ok_or_else(|| "no config file found; create one with 'ruleman init'".to_string()),
     }
 }
 

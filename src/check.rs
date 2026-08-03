@@ -1,50 +1,28 @@
-//! The check engine: runs each rule against the working tree and reports
-//! failures in GitHub Actions workflow-command format.
+//! The check engine: runs each rule against the working tree and collects
+//! failures as diagnostics. How those reach the user is `output`'s job.
 
 use crate::checksum::file_checksum;
 use crate::config::{Config, load_config, resolve_config_path};
+use crate::output::{Diagnostic, OutputFormat, render};
 use crate::rule::{ContentFormat, FileState, MatchState, Rule, Severity};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+/// Walks a dot-separated path into a parsed document. A segment of digits
+/// indexes into an array, so `dependencies.0` and `a.b.1.c` resolve.
 pub(crate) fn get_value_by_dotted_key<'a>(root: &'a Value, dotted_key: &str) -> Option<&'a Value> {
-    dotted_key
-        .split('.')
-        .try_fold(root, |current, segment| current.get(segment))
+    dotted_key.split('.').try_fold(root, |current, segment| {
+        match (current, segment.parse::<usize>()) {
+            (Value::Array(items), Ok(index)) => items.get(index),
+            _ => current.get(segment),
+        }
+    })
 }
 
 pub(crate) fn json_key_matches(root: &Value, key: &str, expected: &Value) -> bool {
     get_value_by_dotted_key(root, key).is_some_and(|actual| actual == expected)
-}
-
-pub(crate) fn report(severity: Severity, message: &str) -> bool {
-    match severity {
-        Severity::Off => false,
-        Severity::Warn => {
-            eprintln!("::warning::{}", message);
-            false
-        }
-        Severity::Error => {
-            eprintln!("::error::{}", message);
-            true
-        }
-    }
-}
-
-pub(crate) fn report_at(severity: Severity, file: &str, message: &str) -> bool {
-    match severity {
-        Severity::Off => false,
-        Severity::Warn => {
-            eprintln!("::warning file={}::{}", file, message);
-            false
-        }
-        Severity::Error => {
-            eprintln!("::error file={}::{}", file, message);
-            true
-        }
-    }
 }
 
 /// Checks a directory's emptiness once it's already confirmed to exist and
@@ -58,27 +36,24 @@ pub(crate) fn check_directory_emptiness(
     let is_empty = match fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_none(),
         Err(e) => {
-            return Some(format!(
-                "[ruleman] ディレクトリ '{}' の読み取りに失敗しました: {}",
-                display, e
-            ));
+            return Some(format!("cannot read directory '{}': {}", display, e));
         }
     };
     match (want_empty, is_empty) {
         (true, false) => Some(format!(
-            "[ruleman] ディレクトリ '{}' は空である必要がありますが、空ではありません。",
+            "directory '{}' must be empty, but it is not",
             display
         )),
         (false, true) => Some(format!(
-            "[ruleman] ディレクトリ '{}' は空でない必要がありますが、空です。",
+            "directory '{}' must not be empty, but it is",
             display
         )),
         _ => None,
     }
 }
 
-pub(crate) fn run_config(config: Config) -> i32 {
-    let mut has_errors = false;
+pub(crate) fn check_config(config: Config) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
 
     for rule in config.rules {
         match rule {
@@ -93,22 +68,20 @@ pub(crate) fn run_config(config: Config) -> i32 {
                 for file in files {
                     let path = Path::new(&file);
                     let message = match state {
-                        FileState::Absent if path.exists() => Some(format!(
-                            "[ruleman] 存在してはいけないファイル '{}' が見つかりました。",
-                            file
-                        )),
-                        FileState::Present if !path.exists() => Some(format!(
-                            "[ruleman] 必須ファイル '{}' が見つかりません。",
-                            file
-                        )),
+                        FileState::Absent if path.exists() => {
+                            Some(format!("file '{}' must not exist, but it does", file))
+                        }
+                        FileState::Present if !path.exists() => {
+                            Some(format!("required file '{}' is missing", file))
+                        }
                         FileState::Present if !path.is_file() => Some(format!(
-                            "[ruleman] '{}' はファイルである必要がありますが、ディレクトリが存在します。",
+                            "'{}' must be a regular file, but a directory exists there",
                             file
                         )),
                         _ => None,
                     };
                     if let Some(message) = message {
-                        has_errors |= report(severity, &message);
+                        diagnostics.push(Diagnostic::new(severity, "file", Some(file), message));
                     }
                 }
             }
@@ -124,23 +97,26 @@ pub(crate) fn run_config(config: Config) -> i32 {
                 for dir in directories {
                     let path = Path::new(&dir);
                     let message = match state {
-                        FileState::Absent if path.exists() => Some(format!(
-                            "[ruleman] 存在してはいけないディレクトリ '{}' が見つかりました。",
-                            dir
-                        )),
-                        FileState::Present if !path.exists() => Some(format!(
-                            "[ruleman] 必須ディレクトリ '{}' が見つかりません。",
-                            dir
-                        )),
+                        FileState::Absent if path.exists() => {
+                            Some(format!("directory '{}' must not exist, but it does", dir))
+                        }
+                        FileState::Present if !path.exists() => {
+                            Some(format!("required directory '{}' is missing", dir))
+                        }
                         FileState::Present if !path.is_dir() => Some(format!(
-                            "[ruleman] '{}' はディレクトリである必要がありますが、ファイルが存在します。",
+                            "'{}' must be a directory, but a file exists there",
                             dir
                         )),
                         FileState::Present => check_directory_emptiness(path, &dir, empty),
                         FileState::Absent => None,
                     };
                     if let Some(message) = message {
-                        has_errors |= report(severity, &message);
+                        diagnostics.push(Diagnostic::new(
+                            severity,
+                            "directory",
+                            Some(dir),
+                            message,
+                        ));
                     }
                 }
             }
@@ -155,41 +131,8 @@ pub(crate) fn run_config(config: Config) -> i32 {
                 if severity == Severity::Off {
                     continue;
                 }
-
-                let path = Path::new(&file);
-                let fail = || format!("[ruleman] ルール不適合: {} の検証に失敗しました。", key);
-
-                if !path.exists() {
-                    has_errors |= report_at(severity, &file, &fail());
-                    continue;
-                }
-
-                let raw = match fs::read_to_string(path) {
-                    Ok(content) => content,
-                    Err(_) => {
-                        has_errors |= report_at(severity, &file, &fail());
-                        continue;
-                    }
-                };
-
-                let parsed = match format {
-                    ContentFormat::Json => serde_json::from_str::<Value>(&raw),
-                };
-                let document = match parsed {
-                    Ok(value) => value,
-                    Err(_) => {
-                        has_errors |= report_at(severity, &file, &fail());
-                        continue;
-                    }
-                };
-
-                let matches = json_key_matches(&document, &key, &expected);
-                let fails = match state {
-                    MatchState::Match => !matches,
-                    MatchState::Mismatch => matches,
-                };
-                if fails {
-                    has_errors |= report_at(severity, &file, &fail());
+                if let Some(message) = check_content(format, state, &file, &key, &expected) {
+                    diagnostics.push(Diagnostic::new(severity, "content", Some(file), message));
                 }
             }
             Rule::Checksum {
@@ -206,11 +149,13 @@ pub(crate) fn run_config(config: Config) -> i32 {
                 let actual = match file_checksum(Path::new(&file), algorithm) {
                     Ok(actual) => actual,
                     Err(e) => {
-                        let message = format!(
-                            "[ruleman] ファイル '{}' のハッシュを計算できません: {}",
-                            file, e
-                        );
-                        has_errors |= report_at(severity, &file, &message);
+                        let message = format!("cannot hash '{}': {}", file, e);
+                        diagnostics.push(Diagnostic::new(
+                            severity,
+                            "checksum",
+                            Some(file),
+                            message,
+                        ));
                         continue;
                     }
                 };
@@ -219,52 +164,99 @@ pub(crate) fn run_config(config: Config) -> i32 {
                 let matches = actual.eq_ignore_ascii_case(expected);
                 let message = match state {
                     MatchState::Match if !matches => Some(format!(
-                        "[ruleman] ファイル '{}' の {} ハッシュが記録と一致しません (期待: {}, 実際: {})。内容の変更が意図したものなら 'ruleman add --checksum {}' で記録し直してください。",
-                        file,
+                        "{} checksum of '{}' does not match the recorded digest \
+                         (expected {}, actual {}). If the change was intentional, \
+                         re-record it with 'ruleman add --checksum {}'",
                         algorithm.as_str(),
+                        file,
                         expected,
                         actual,
                         file
                     )),
                     MatchState::Mismatch if matches => Some(format!(
-                        "[ruleman] ファイル '{}' の {} ハッシュが '{}' と一致しています。一致してはいけません。",
-                        file,
+                        "{} checksum of '{}' matches '{}', which it must not",
                         algorithm.as_str(),
+                        file,
                         expected
                     )),
                     _ => None,
                 };
                 if let Some(message) = message {
-                    has_errors |= report_at(severity, &file, &message);
+                    diagnostics.push(Diagnostic::new(severity, "checksum", Some(file), message));
                 }
             }
         }
     }
 
-    if has_errors {
-        1
-    } else {
-        println!("[ruleman] すべての標準チェックに合格しました!");
-        0
+    diagnostics
+}
+
+/// Returns the failure message for a `content` rule, or `None` when it passes.
+fn check_content(
+    format: ContentFormat,
+    state: MatchState,
+    file: &str,
+    key: &str,
+    expected: &Value,
+) -> Option<String> {
+    let path = Path::new(file);
+    if !path.exists() {
+        return Some(format!(
+            "cannot check '{}': file '{}' is missing",
+            key, file
+        ));
+    }
+
+    let raw = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => return Some(format!("cannot read '{}': {}", file, e)),
+    };
+
+    let parsed = match format {
+        ContentFormat::Json => serde_json::from_str::<Value>(&raw),
+    };
+    let document = match parsed {
+        Ok(value) => value,
+        Err(e) => {
+            return Some(format!(
+                "cannot parse '{}' as {}: {}",
+                file,
+                format.as_str(),
+                e
+            ));
+        }
+    };
+
+    let matches = json_key_matches(&document, key, expected);
+    match state {
+        MatchState::Match if !matches => {
+            let actual = match get_value_by_dotted_key(&document, key) {
+                Some(value) => value.to_string(),
+                None => "not set".to_string(),
+            };
+            Some(format!(
+                "'{}' in '{}' must be {}, but it is {}",
+                key, file, expected, actual
+            ))
+        }
+        MatchState::Mismatch if matches => Some(format!(
+            "'{}' in '{}' must not be {}, but it is",
+            key, file, expected
+        )),
+        _ => None,
     }
 }
 
-pub(crate) fn run(config_arg: Option<&str>) -> i32 {
+pub(crate) fn run(config_arg: Option<&str>, format: OutputFormat) -> i32 {
     let config_path = match resolve_config_path(config_arg) {
         Ok(path) => path,
-        Err(message) => {
-            eprintln!("{}", message);
-            return 1;
-        }
+        Err(message) => return render(format, &[Diagnostic::config(message)]),
     };
 
     let mut visited = HashSet::new();
     match load_config(&config_path, &mut visited) {
-        Ok(config) => run_config(config),
-        Err(message) => {
-            eprintln!("{}", message);
-            1
-        }
+        Ok(config) => render(format, &check_config(config)),
+        Err(message) => render(format, &[Diagnostic::config(message)]),
     }
 }
 
@@ -295,6 +287,23 @@ mod tests {
 
         let found = get_value_by_dotted_key(&value, "compilerOptions.noImplicitAny");
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn dotted_key_indexes_into_arrays() {
+        let value = json!({ "workspaces": ["packages/*", "apps/web"] });
+
+        assert_eq!(
+            get_value_by_dotted_key(&value, "workspaces.1"),
+            Some(&json!("apps/web"))
+        );
+        assert!(get_value_by_dotted_key(&value, "workspaces.9").is_none());
+        // A digit segment against an object still reads the literal key.
+        let numeric_keys = json!({ "scripts": { "0": "noop" } });
+        assert_eq!(
+            get_value_by_dotted_key(&numeric_keys, "scripts.0"),
+            Some(&json!("noop"))
+        );
     }
 
     #[test]
@@ -349,7 +358,50 @@ mod tests {
 
         let mut visited = HashSet::new();
         let config = load_config(&config_path, &mut visited).unwrap();
-        assert_eq!(run_config(config), 1);
+        let diagnostics = check_config(config);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("must be a regular file"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn content_rule_reports_the_actual_value() {
+        let dir = std::env::temp_dir().join("ruleman_test_content_message");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "engines": { "node": "18" } }"#,
+        )
+        .unwrap();
+        let config_path = dir.join("ruleman.json");
+        fs::write(
+            &config_path,
+            r#"{ "rules": [ { "type": "content", "file": "package.json",
+                 "key": "engines.node", "expected": "20" } ] }"#,
+        )
+        .unwrap();
+
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        let diagnostics = check_config(config);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains(r#"must be "20""#));
+        assert!(diagnostics[0].message.contains(r#"but it is "18""#));
+
+        // A key that isn't there at all says so rather than reporting a value.
+        fs::write(
+            &config_path,
+            r#"{ "rules": [ { "type": "content", "file": "package.json",
+                 "key": "engines.bun", "expected": "1" } ] }"#,
+        )
+        .unwrap();
+        let config = load_config(&config_path, &mut HashSet::new()).unwrap();
+        assert!(
+            check_config(config)[0]
+                .message
+                .contains("but it is not set")
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -370,11 +422,16 @@ mod tests {
         )
         .unwrap();
         let config = load_config(&config_path, &mut HashSet::new()).unwrap();
-        assert_eq!(run_config(config), 0);
+        assert!(check_config(config).is_empty());
 
         fs::write(dir.join("a.txt"), "abcd").unwrap();
         let config = load_config(&config_path, &mut HashSet::new()).unwrap();
-        assert_eq!(run_config(config), 1);
+        let diagnostics = check_config(config);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        // The rule path is resolved relative to the config file, which here
+        // lives in a temp directory.
+        assert!(diagnostics[0].file.as_deref().unwrap().ends_with("a.txt"));
 
         fs::remove_dir_all(&dir).unwrap();
     }

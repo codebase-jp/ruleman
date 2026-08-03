@@ -40,6 +40,14 @@ pub(crate) enum ContentFormat {
     Json,
 }
 
+impl ContentFormat {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ContentFormat::Json => "json",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MatchState {
@@ -116,7 +124,7 @@ pub(crate) fn validate_rule(rule: &Rule) -> Result<(), String> {
         let digest = expected.trim();
         if digest.len() != algorithm.hex_width() || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!(
-                "'expected' は {} のダイジェストを16進{}文字で指定してください: '{}'",
+                "'expected' must be a bare {} digest of {} hex characters: '{}'",
                 algorithm.as_str(),
                 algorithm.hex_width(),
                 expected

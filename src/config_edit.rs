@@ -31,8 +31,8 @@ impl PathKind {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            PathKind::File => "ファイル",
-            PathKind::Directory => "ディレクトリ",
+            PathKind::File => "file",
+            PathKind::Directory => "directory",
         }
     }
 }
@@ -91,7 +91,7 @@ pub(crate) fn add_entries_to_config_text(
     let object = root.object_value_or_set();
     let rules = object
         .array_value_or_create("rules")
-        .ok_or_else(|| "'rules' が配列ではありません。".to_string())?;
+        .ok_or_else(|| "'rules' is not an array".to_string())?;
 
     let results = entries
         .iter()

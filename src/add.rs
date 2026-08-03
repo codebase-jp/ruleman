@@ -4,6 +4,7 @@
 use crate::checksum::{ChecksumAlgorithm, file_checksum};
 use crate::config::resolve_config_path;
 use crate::config_edit::{AddEntry, AddResult, PathKind, add_entries_to_config_text};
+use crate::output::{OutputFormat, emit_error, emit_info};
 use crate::rule::Severity;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,17 +20,17 @@ pub(crate) fn path_relative_to_config(config_path: &Path, input: &str) -> Result
     };
     let base = fs::canonicalize(&config_dir).map_err(|e| {
         format!(
-            "[ruleman] 設定ファイルのディレクトリ '{}' を解決できません: {}",
+            "cannot resolve the config file's directory '{}': {}",
             config_dir.display(),
             e
         )
     })?;
-    let target = fs::canonicalize(input)
-        .map_err(|e| format!("[ruleman] '{}' を解決できません: {}", input, e))?;
+    let target =
+        fs::canonicalize(input).map_err(|e| format!("cannot resolve '{}': {}", input, e))?;
 
     let relative = target.strip_prefix(&base).map_err(|_| {
         format!(
-            "[ruleman] '{}' は設定ファイル '{}' のディレクトリの外にあります。",
+            "'{}' is outside the directory of config file '{}'",
             input,
             config_path.display()
         )
@@ -42,10 +43,7 @@ pub(crate) fn path_relative_to_config(config_path: &Path, input: &str) -> Result
         .join("/");
 
     if joined.is_empty() {
-        Err(format!(
-            "[ruleman] '{}' は設定ファイルのディレクトリそのものです。",
-            input
-        ))
+        Err(format!("'{}' is the config file's own directory", input))
     } else {
         Ok(joined)
     }
@@ -60,7 +58,7 @@ pub(crate) fn build_add_entry(
 ) -> Result<AddEntry, String> {
     let metadata = fs::metadata(input).map_err(|_| {
         format!(
-            "[ruleman] '{}' が見つかりません。既存のファイルまたはディレクトリを指定してください。",
+            "'{}' not found; pass a file or directory that exists",
             input
         )
     })?;
@@ -70,12 +68,12 @@ pub(crate) fn build_add_entry(
         Some(algorithm) => {
             if !metadata.is_file() {
                 return Err(format!(
-                    "[ruleman] '{}' はディレクトリです。--checksum はファイルにのみ指定できます。",
+                    "'{}' is a directory; --checksum only applies to files",
                     input
                 ));
             }
             let digest = file_checksum(Path::new(input), algorithm)
-                .map_err(|e| format!("[ruleman] '{}' のハッシュを計算できません: {}", input, e))?;
+                .map_err(|e| format!("cannot hash '{}': {}", input, e))?;
             Ok(AddEntry::Checksum {
                 path,
                 algorithm,
@@ -98,11 +96,12 @@ pub(crate) fn run(
     paths: &[String],
     severity: Severity,
     checksum: Option<ChecksumAlgorithm>,
+    format: OutputFormat,
 ) -> i32 {
     let config_path = match resolve_config_path(config_arg) {
         Ok(path) => path,
         Err(message) => {
-            eprintln!("{}", message);
+            emit_error(format, &message);
             return 1;
         }
     };
@@ -110,10 +109,9 @@ pub(crate) fn run(
     let text = match fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(e) => {
-            eprintln!(
-                "::error::[ruleman] 設定ファイル '{}' の読み込みに失敗しました: {}",
-                config_path.display(),
-                e
+            emit_error(
+                format,
+                &format!("cannot read config file '{}': {}", config_path.display(), e),
             );
             return 1;
         }
@@ -124,7 +122,7 @@ pub(crate) fn run(
         match build_add_entry(&config_path, path, checksum) {
             Ok(entry) => entries.push(entry),
             Err(message) => {
-                eprintln!("::error::{}", message);
+                emit_error(format, &message);
                 return 1;
             }
         }
@@ -133,10 +131,13 @@ pub(crate) fn run(
     let outcome = match add_entries_to_config_text(&text, &entries, severity) {
         Ok(outcome) => outcome,
         Err(message) => {
-            eprintln!(
-                "::error::[ruleman] 設定ファイル '{}' の更新に失敗しました: {}",
-                config_path.display(),
-                message
+            emit_error(
+                format,
+                &format!(
+                    "cannot update config file '{}': {}",
+                    config_path.display(),
+                    message
+                ),
             );
             return 1;
         }
@@ -145,16 +146,19 @@ pub(crate) fn run(
     if outcome.changed()
         && let Err(e) = fs::write(&config_path, &outcome.text)
     {
-        eprintln!(
-            "::error::[ruleman] 設定ファイル '{}' の書き込みに失敗しました: {}",
-            config_path.display(),
-            e
+        emit_error(
+            format,
+            &format!(
+                "cannot write config file '{}': {}",
+                config_path.display(),
+                e
+            ),
         );
         return 1;
     }
 
     for (entry, result) in entries.iter().zip(&outcome.results) {
-        println!("[ruleman] {}", add_message(entry, *result, &config_path));
+        emit_info(format, &add_message(entry, *result, &config_path));
     }
     0
 }
@@ -164,15 +168,10 @@ pub(crate) fn add_message(entry: &AddEntry, result: AddResult, config_path: &Pat
     let config = config_path.display();
     match (entry, result) {
         (AddEntry::Existence { kind, .. }, AddResult::Added) => {
-            format!(
-                "{} '{}' を '{}' に追加しました。",
-                kind.label(),
-                path,
-                config
-            )
+            format!("added {} '{}' to '{}'", kind.label(), path, config)
         }
         (AddEntry::Existence { .. }, _) => {
-            format!("'{}' は既に登録されています。", path)
+            format!("'{}' is already registered", path)
         }
         (
             AddEntry::Checksum {
@@ -180,7 +179,7 @@ pub(crate) fn add_message(entry: &AddEntry, result: AddResult, config_path: &Pat
             },
             AddResult::Added,
         ) => format!(
-            "'{}' の {} ハッシュを '{}' に記録しました: {}",
+            "recorded the {1} checksum of '{0}' in '{2}': {3}",
             path,
             algorithm.as_str(),
             config,
@@ -192,13 +191,13 @@ pub(crate) fn add_message(entry: &AddEntry, result: AddResult, config_path: &Pat
             },
             AddResult::Updated,
         ) => format!(
-            "'{}' の {} ハッシュを更新しました: {}",
+            "updated the {1} checksum of '{0}': {2}",
             path,
             algorithm.as_str(),
             digest
         ),
         (AddEntry::Checksum { algorithm, .. }, AddResult::Skipped) => format!(
-            "'{}' の {} ハッシュは記録済みの値と同じです。",
+            "the {1} checksum of '{0}' already matches the recorded digest",
             path,
             algorithm.as_str()
         ),
